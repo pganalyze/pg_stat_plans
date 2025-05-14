@@ -80,6 +80,7 @@ You can also group by `queryid` retrieved from `pg_stat_statements`, to get the 
 ```sql
 SELECT queryid, query FROM pg_stat_statements WHERE queryid = -7079927730720784986;
 ```
+```
 -[ RECORD 1 ]-------------------------------------------------------------------------------------------------------------------------
 queryid | -7079927730720784986
 query   | INSERT INTO schema_column_stats_7d (                                                                                        +
@@ -170,12 +171,12 @@ Note that these will run against an existing local Postgres installation, which 
 
 ## Configuration
 
-| setting                | possible values | default | description                                                                               |   |   |
-|------------------------|-----------------|---------|-------------------------------------------------------------------------------------------|---|---|
-| pg_stat_plans.max      | 100 - INT_MAX/2 | 5000    | Sets the maximum number of plans tracked by pg_stat_plans in shared memory.               |   |   |
-| pg_stat_plans.max_size | 100 - 1048576   | 2048    | Sets the maximum size of plan texts (in bytes) tracked by pg_stat_plans in shared memory. |   |   |
-| pg_stat_plans.track    | top<br>all         | top     | Selects which plans are tracked by pg_stat_plans.                                         |   |   |
-| pg_stat_plans.compress | none<br>zstd       | none    | Select compression used by pg_stat_plans.                                                 |   |   |
+| setting                | possible values | default | description                                                                               |
+|------------------------|-----------------|---------|-------------------------------------------------------------------------------------------|
+| pg_stat_plans.max      | 100 - INT_MAX/2 | 5000    | Sets the maximum number of plans tracked by pg_stat_plans in shared memory.               |
+| pg_stat_plans.max_size | 100 - 1048576   | 2048    | Sets the maximum size of plan texts (in bytes) tracked by pg_stat_plans in shared memory. |
+| pg_stat_plans.track    | top<br>all         | top     | Selects which plans are tracked by pg_stat_plans.                                         |
+| pg_stat_plans.compress | none<br>zstd       | none    | Select compression used by pg_stat_plans.                                                 |
 
 ## Known issues
 
@@ -196,11 +197,11 @@ Inspired by earlier work done by Sami Imseih.
 
 ## License
 
-PostgreSQL server code (jumblefuncs.*) incorporated under the PostgreSQL license
-Portions Copyright (c) 1996-2025, The PostgreSQL Global Development Group
+PostgreSQL server code (jumblefuncs.*) incorporated under the PostgreSQL license<br>
+Portions Copyright (c) 1996-2025, The PostgreSQL Global Development Group<br>
 Portions Copyright (c) 1994, The Regents of the University of California
 
-All other parts are licensed under the PostgreSQL license
+All other parts are licensed under the PostgreSQL license<br>
 Copyright (c) 2025, Duboce Labs, Inc. (pganalyze) <team@pganalyze.com>
 
 See LICENSE file for details.
