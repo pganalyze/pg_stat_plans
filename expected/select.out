@@ -1,0 +1,262 @@
+--
+-- SELECT statements
+--
+CREATE EXTENSION pg_stat_plans;
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+--
+-- simple statements
+--
+SELECT 1 FROM pg_class LIMIT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT 1 FROM pg_class WHERE relname = 'pg_class';
+ ?column? 
+----------
+        1
+(1 row)
+
+SET enable_indexscan = off;
+SELECT 1 FROM pg_class WHERE relname = 'pg_class';
+ ?column? 
+----------
+        1
+(1 row)
+
+SET enable_indexscan = on;
+SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
+                             plan                             | calls 
+--------------------------------------------------------------+-------
+ Bitmap Heap Scan on pg_class                                +|     1
+   Recheck Cond: (relname = 'pg_class'::name)                +| 
+   ->  Bitmap Index Scan on pg_class_relname_nsp_index       +| 
+         Index Cond: (relname = 'pg_class'::name)             | 
+ Index Only Scan using pg_class_relname_nsp_index on pg_class+|     1
+   Index Cond: (relname = 'pg_class'::name)                   | 
+ Limit                                                       +|     1
+   ->  Seq Scan on pg_class                                   | 
+ Result                                                       |     1
+ Sort                                                        +|     0
+   Sort Key: pg_stat_plans.plan COLLATE "C"                  +| 
+   ->  Function Scan on pg_stat_plans                         | 
+(5 rows)
+
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+--
+-- subplans and CTEs
+--
+WITH x AS MATERIALIZED (SELECT 1)
+SELECT * FROM x;
+ ?column? 
+----------
+        1
+(1 row)
+
+SELECT a.attname,
+   (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+    FROM pg_catalog.pg_attrdef d
+    WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef)
+ FROM pg_catalog.pg_attribute a
+ WHERE a.attrelid = 'pg_class'::regclass
+ ORDER BY attnum LIMIT 1;
+ attname  | pg_get_expr 
+----------+-------------
+ tableoid | 
+(1 row)
+
+SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
+                                     plan                                      | calls 
+-------------------------------------------------------------------------------+-------
+ CTE Scan on x                                                                +|     1
+   CTE x                                                                      +| 
+     ->  Result                                                                | 
+ Limit                                                                        +|     1
+   ->  Index Scan using pg_attribute_relid_attnum_index on pg_attribute a     +| 
+         Index Cond: (attrelid = '1259'::oid)                                 +| 
+         SubPlan 1                                                            +| 
+           ->  Result                                                         +| 
+                 One-Time Filter: a.atthasdef                                 +| 
+                 ->  Seq Scan on pg_attrdef d                                 +| 
+                       Filter: ((adrelid = a.attrelid) AND (adnum = a.attnum)) | 
+ Result                                                                        |     1
+ Sort                                                                         +|     0
+   Sort Key: pg_stat_plans.plan COLLATE "C"                                   +| 
+   ->  Function Scan on pg_stat_plans                                          | 
+(4 rows)
+
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+--
+-- partitoning
+--
+create table lp (a char) partition by list (a);
+create table lp_default partition of lp default;
+create table lp_ef partition of lp for values in ('e', 'f');
+create table lp_ad partition of lp for values in ('a', 'd');
+create table lp_bc partition of lp for values in ('b', 'c');
+create table lp_g partition of lp for values in ('g');
+create table lp_null partition of lp for values in (null);
+select * from lp;
+ a 
+---
+(0 rows)
+
+select * from lp where a > 'a' and a < 'd';
+ a 
+---
+(0 rows)
+
+select * from lp where a > 'a' and a <= 'd';
+ a 
+---
+(0 rows)
+
+select * from lp where a = 'a';
+ a 
+---
+(0 rows)
+
+select * from lp where 'a' = a;	/* commuted */
+ a 
+---
+(0 rows)
+
+select * from lp where a is not null;
+ a 
+---
+(0 rows)
+
+select * from lp where a is null;
+ a 
+---
+(0 rows)
+
+select * from lp where a = 'a' or a = 'c';
+ a 
+---
+(0 rows)
+
+select * from lp where a is not null and (a = 'a' or a = 'c');
+ a 
+---
+(0 rows)
+
+select * from lp where a <> 'g';
+ a 
+---
+(0 rows)
+
+select * from lp where a <> 'a' and a <> 'd';
+ a 
+---
+(0 rows)
+
+select * from lp where a not in ('a', 'd');
+ a 
+---
+(0 rows)
+
+SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
+                                      plan                                      | calls 
+--------------------------------------------------------------------------------+-------
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+         Filter: ((a = 'a'::bpchar) OR (a = 'c'::bpchar))                      +| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+         Filter: ((a = 'a'::bpchar) OR (a = 'c'::bpchar))                       | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+         Filter: ((a > 'a'::bpchar) AND (a <= 'd'::bpchar))                    +| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+         Filter: ((a > 'a'::bpchar) AND (a <= 'd'::bpchar))                    +| 
+   ->  Seq Scan on lp_default lp_3                                             +| 
+         Filter: ((a > 'a'::bpchar) AND (a <= 'd'::bpchar))                     | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+         Filter: ((a IS NOT NULL) AND ((a = 'a'::bpchar) OR (a = 'c'::bpchar)))+| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+         Filter: ((a IS NOT NULL) AND ((a = 'a'::bpchar) OR (a = 'c'::bpchar))) | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+         Filter: (a <> 'g'::bpchar)                                            +| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+         Filter: (a <> 'g'::bpchar)                                            +| 
+   ->  Seq Scan on lp_ef lp_3                                                  +| 
+         Filter: (a <> 'g'::bpchar)                                            +| 
+   ->  Seq Scan on lp_default lp_4                                             +| 
+         Filter: (a <> 'g'::bpchar)                                             | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+         Filter: (a IS NOT NULL)                                               +| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+         Filter: (a IS NOT NULL)                                               +| 
+   ->  Seq Scan on lp_ef lp_3                                                  +| 
+         Filter: (a IS NOT NULL)                                               +| 
+   ->  Seq Scan on lp_g lp_4                                                   +| 
+         Filter: (a IS NOT NULL)                                               +| 
+   ->  Seq Scan on lp_default lp_5                                             +| 
+         Filter: (a IS NOT NULL)                                                | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_ad lp_1                                                  +| 
+   ->  Seq Scan on lp_bc lp_2                                                  +| 
+   ->  Seq Scan on lp_ef lp_3                                                  +| 
+   ->  Seq Scan on lp_g lp_4                                                   +| 
+   ->  Seq Scan on lp_null lp_5                                                +| 
+   ->  Seq Scan on lp_default lp_6                                              | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_bc lp_1                                                  +| 
+         Filter: ((a <> 'a'::bpchar) AND (a <> 'd'::bpchar))                   +| 
+   ->  Seq Scan on lp_ef lp_2                                                  +| 
+         Filter: ((a <> 'a'::bpchar) AND (a <> 'd'::bpchar))                   +| 
+   ->  Seq Scan on lp_g lp_3                                                   +| 
+         Filter: ((a <> 'a'::bpchar) AND (a <> 'd'::bpchar))                   +| 
+   ->  Seq Scan on lp_default lp_4                                             +| 
+         Filter: ((a <> 'a'::bpchar) AND (a <> 'd'::bpchar))                    | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_bc lp_1                                                  +| 
+         Filter: ((a > 'a'::bpchar) AND (a < 'd'::bpchar))                     +| 
+   ->  Seq Scan on lp_default lp_2                                             +| 
+         Filter: ((a > 'a'::bpchar) AND (a < 'd'::bpchar))                      | 
+ Append                                                                        +|     1
+   ->  Seq Scan on lp_bc lp_1                                                  +| 
+         Filter: (a <> ALL ('{a,d}'::bpchar[]))                                +| 
+   ->  Seq Scan on lp_ef lp_2                                                  +| 
+         Filter: (a <> ALL ('{a,d}'::bpchar[]))                                +| 
+   ->  Seq Scan on lp_g lp_3                                                   +| 
+         Filter: (a <> ALL ('{a,d}'::bpchar[]))                                +| 
+   ->  Seq Scan on lp_default lp_4                                             +| 
+         Filter: (a <> ALL ('{a,d}'::bpchar[]))                                 | 
+ Result                                                                         |     1
+ Seq Scan on lp_ad lp                                                          +|     1
+   Filter: ('a'::bpchar = a)                                                    | 
+ Seq Scan on lp_ad lp                                                          +|     1
+   Filter: (a = 'a'::bpchar)                                                    | 
+ Seq Scan on lp_null lp                                                        +|     1
+   Filter: (a IS NULL)                                                          | 
+ Sort                                                                          +|     0
+   Sort Key: pg_stat_plans.plan COLLATE "C"                                    +| 
+   ->  Function Scan on pg_stat_plans                                           | 
+(14 rows)
+
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+

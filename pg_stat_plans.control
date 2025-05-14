@@ -1,0 +1,5 @@
+# pg_stat_plans extension
+comment = 'track per-plan call counts, execution times and EXPLAIN texts'
+default_version = '2.0'
+module_pathname = '$libdir/pg_stat_plans'
+relocatable = true
