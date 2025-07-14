@@ -810,21 +810,16 @@ pgsp_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
 /*
  * ExecutorStart hook: start up tracking if needed
  */
-static bool
+static void
 pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-	bool		plan_valid;
 	uint64		queryId = queryDesc->plannedstmt->queryId;
 	uint64		planId = queryDesc->plannedstmt->planId;
 
 	if (prev_ExecutorStart)
-		plan_valid = prev_ExecutorStart(queryDesc, eflags);
+		prev_ExecutorStart(queryDesc, eflags);
 	else
-		plan_valid = standard_ExecutorStart(queryDesc, eflags);
-
-	/* The plan may have become invalid during standard_ExecutorStart() */
-	if (!plan_valid)
-		return false;
+		standard_ExecutorStart(queryDesc, eflags);
 
 	if (queryId != UINT64CONST(0) && planId != UINT64CONST(0) &&
 		pgsp_enabled(nesting_level))
@@ -852,8 +847,6 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
-
-	return true;
 }
 
 /*
