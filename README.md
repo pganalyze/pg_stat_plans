@@ -12,13 +12,15 @@ This project is inspired by multiple Postgres community projects, including the 
 
 ## Supported PostgreSQL versions
 
-Currently requires Postgres 18 beta1, due to relying on pluggable cumulative statistics ([7949d95945](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=7949d9594582ab49dee221e1db1aa5401ace49d4)) and plan ID tracking per backend ([2a0cd38da5](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=2a0cd38da5ccf70461c51a489ee7d25fcd3f26be)). 
+Requires at least Postgres 16.
 
-Support for older versions with a reduced feature set will likely be added in the future.
+Showing plans of running queries requires Postgres 18 or newer, due to relying on plan ID tracking per backend ([2a0cd38da5](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=2a0cd38da5ccf70461c51a489ee7d25fcd3f26be)).
+
+Uses pluggable cumulative statistics ([7949d95945](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=7949d9594582ab49dee221e1db1aa5401ace49d4)) on Postgres 18. On Postgres 16 and 17 a shim that replicates similar functionality is used.
 
 ## Installation
 
-You can use `make install` to build and install the extension. This requires having a `pg_config` in your path that references a Postgres 18 beta1 or newer installation. You can optionally build with `zstd` support for compressing plan texts in shared memory.
+You can use `make install` to build and install the extension. This requires having a `pg_config` in your path that references a Postgres 16 or newer installation. You can optionally build with `zstd` support for compressing plan texts in shared memory.
 
 After installing, make sure that your Postgres server loads the shared library:
 

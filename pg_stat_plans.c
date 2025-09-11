@@ -18,23 +18,28 @@
 #include "access/parallel.h"
 #include "catalog/pg_authid.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
+#endif
 #include "common/hashfn.h"
 #include "funcapi.h"
+#include "lib/dshash.h"
+#include "libpq/auth.h"
 #include "mb/pg_wchar.h"
 #include "nodes/queryjumble.h"
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "pgstat.h"
+#include "storage/ipc.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/pgstat_internal.h"
 #include "utils/snapmgr.h"
 
 #include "jumblefuncs.h"
+#include "pgstat_custom.h"
 
 #ifdef USE_ZSTD
 #include <zstd.h>
@@ -143,16 +148,19 @@ typedef struct PgStatShared_Plan
 }			PgStatShared_Plan;
 
 static bool plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+static uint64 pgsp_calculate_plan_id(PlannedStmt *result);
 
 static const PgStat_KindInfo plan_stats = {
 	.name = "plan_stats",
 	.fixed_amount = false,
 
+#if PG_VERSION_NUM >= 180000
 	/*
 	 * We currently don't write to a file since plan texts would get lost (and
 	 * just the stats on their own aren't that useful)
 	 */
 	.write_to_file = false,
+#endif
 
 	/*
 	 * Plan statistics are available system-wide to simplify monitoring
@@ -179,7 +187,11 @@ static const PgStat_KindInfo plan_stats = {
 /*
  * Kind ID reserved for statistics of plans.
  */
+#if PG_VERSION_NUM >= 180000
 #define PGSTAT_KIND_PLANS	PGSTAT_KIND_EXPERIMENTAL	/* TODO: Assign */
+#else
+#define PGSTAT_KIND_PLANS	24	/* TODO: Assign */
+#endif
 
 /*
  * Callback for stats handling
@@ -193,14 +205,14 @@ plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	localent = (PgStat_StatPlanEntry *) entry_ref->pending;
 	shfuncent = (PgStatShared_Plan *) entry_ref->shared_stats;
 
-	if (!pgstat_lock_entry(entry_ref, nowait))
+	if (!pgstat_custom_lock_entry(entry_ref, nowait))
 		return false;
 
 	shfuncent->stats.exec_count += localent->exec_count;
 	shfuncent->stats.exec_time += localent->exec_time;
 	shfuncent->stats.usage += localent->usage;
 
-	pgstat_unlock_entry(entry_ref);
+	pgstat_custom_unlock_entry(entry_ref);
 
 	return true;
 }
@@ -240,7 +252,7 @@ pgstat_gc_plan_memory()
 	PgStatShared_HashEntry *p;
 
 	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStatShared_Common *header;
@@ -249,12 +261,12 @@ pgstat_gc_plan_memory()
 		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
 			continue;
 
-		header = dsa_get_address(pgStatLocal.dsa, p->body);
+		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
 
 		if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
 			continue;
 
-		statent = (PgStat_StatPlanEntry *) pgstat_get_entry_data(PGSTAT_KIND_PLANS, header);
+		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
 		/*
 		 * Clean up this entry's plan text allocation, if we haven't done so
@@ -262,7 +274,7 @@ pgstat_gc_plan_memory()
 		 */
 		if (DsaPointerIsValid(statent->info.plan_text))
 		{
-			dsa_free(pgStatLocal.dsa, statent->info.plan_text);
+			dsa_free(pgStatCustomLocal.dsa, statent->info.plan_text);
 			statent->info.plan_text = InvalidDsaPointer;
 
 			/* Allow removal of the shared stats entry */
@@ -274,7 +286,7 @@ pgstat_gc_plan_memory()
 	dshash_seq_term(&hstat);
 
 	/* Encourage other backends to clean up dropped entry refs */
-	pgstat_request_entry_refs_gc();
+	pgstat_custom_request_entry_refs_gc();
 }
 
 typedef struct PlanDeallocEntry
@@ -310,7 +322,7 @@ pgstat_dealloc_plans()
 	int			nvictims;
 
 	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStatShared_Common *header;
@@ -320,12 +332,12 @@ pgstat_dealloc_plans()
 		if (p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
 			continue;
 
-		header = dsa_get_address(pgStatLocal.dsa, p->body);
+		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
 
 		if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
 			continue;
 
-		statent = (PgStat_StatPlanEntry *) pgstat_get_entry_data(PGSTAT_KIND_PLANS, header);
+		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 		statent->usage *= USAGE_DECREASE_FACTOR;
 
 		entry = palloc(sizeof(PlanDeallocEntry));
@@ -350,7 +362,11 @@ pgstat_dealloc_plans()
 	{
 		PlanDeallocEntry *entry = lfirst(lc);
 
-		pgstat_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid);
+#if PG_VERSION_NUM >= 180000
+		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid);
+#else
+		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objoid);
+#endif
 	}
 
 	/* Clean up our working memory immediately */
@@ -377,7 +393,7 @@ pgstat_gc_plans()
 	 * Count our active entries, and whether there are any dropped entries we
 	 * may need to clean up at the end.
 	 */
-	dshash_seq_init(&hstat, pgStatLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		if (p->key.kind != PGSTAT_KIND_PLANS)
@@ -591,11 +607,17 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 	PgStat_StatPlanEntry *statent;
 	bool		newly_created;
 	uint64		queryId = queryDesc->plannedstmt->queryId;
-	uint64		planId = queryDesc->plannedstmt->planId;
+	uint64		planId;
 	Oid			userid = GetUserId();
 	bool		toplevel = (nesting_level == 0);
 
-	entry_ref = pgstat_prep_pending_entry(PGSTAT_KIND_PLANS, MyDatabaseId,
+#if PG_VERSION_NUM >= 180000
+	planId = queryDesc->plannedstmt->planId;
+#else
+	planId = pgsp_calculate_plan_id(queryDesc->plannedstmt);
+#endif
+
+	entry_ref = pgstat_custom_prep_pending_entry(PGSTAT_KIND_PLANS, MyDatabaseId,
 										  PGSTAT_PLAN_IDX(queryId, planId, userid, toplevel), &newly_created);
 
 	shstatent = (PgStatShared_Plan *) entry_ref->shared_stats;
@@ -609,7 +631,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		int			stored_plan_compression = 0;
 		char	   *stored_plan = pgsp_compress_plan_text(plan, &stored_plan_size, &stored_plan_truncated, &stored_plan_compression);
 
-		(void) pgstat_lock_entry(entry_ref, false);
+		(void) pgstat_custom_lock_entry(entry_ref, false);
 
 		/*
 		 * We may be over the limit, so run GC now before saving entry (we do
@@ -622,8 +644,8 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		shstatent->stats.info.queryid = queryId;
 		shstatent->stats.info.userid = userid;
 		shstatent->stats.info.toplevel = toplevel;
-		shstatent->stats.info.plan_text = dsa_allocate(pgStatLocal.dsa, stored_plan_size);
-		memcpy(dsa_get_address(pgStatLocal.dsa, shstatent->stats.info.plan_text), stored_plan, stored_plan_size);
+		shstatent->stats.info.plan_text = dsa_allocate(pgStatCustomLocal.dsa, stored_plan_size);
+		memcpy(dsa_get_address(pgStatCustomLocal.dsa, shstatent->stats.info.plan_text), stored_plan, stored_plan_size);
 		shstatent->stats.info.plan_text_size = stored_plan_size;
 		shstatent->stats.info.plan_text_truncated = stored_plan_truncated;
 		shstatent->stats.info.plan_text_compression = stored_plan_compression;
@@ -635,7 +657,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		 */
 		pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
 
-		pgstat_unlock_entry(entry_ref);
+		pgstat_custom_unlock_entry(entry_ref);
 
 		pfree(plan);
 	}
@@ -727,11 +749,12 @@ pgsp_plan_id_walker(JumbleState *jstate, Plan *plan)
 	JumbleNode(jstate, (Node *) plan);
 }
 
-static void
+static uint64
 pgsp_calculate_plan_id(PlannedStmt *result)
 {
 	JumbleState *jstate = InitJumble();
 	ListCell   *lc;
+	uint64 planId;
 
 	pgsp_plan_id_walker(jstate, result->planTree);
 	foreach(lc, result->subplans)
@@ -742,8 +765,9 @@ pgsp_calculate_plan_id(PlannedStmt *result)
 	}
 
 	JumbleRangeTable(jstate, result->rtable);
-	result->planId = HashJumbleState(jstate);
+	planId = HashJumbleState(jstate);
 	pfree(jstate);
+	return planId;
 }
 
 /*
@@ -778,8 +802,10 @@ pgsp_planner(Query *parse,
 	}
 	PG_END_TRY();
 
+#if PG_VERSION_NUM >= 180000
 	if (pgsp_enabled(nesting_level))
-		pgsp_calculate_plan_id(result);
+		result->planId = pgsp_calculate_plan_id(result);
+#endif
 
 	return result;
 }
@@ -814,16 +840,22 @@ static void
 pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	uint64		queryId = queryDesc->plannedstmt->queryId;
+#if PG_VERSION_NUM >= 180000
 	uint64		planId = queryDesc->plannedstmt->planId;
+#endif
 
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
-	if (queryId != UINT64CONST(0) && planId != UINT64CONST(0) &&
+	if (queryId != UINT64CONST(0) &&
+#if PG_VERSION_NUM >= 180000
+		planId != UINT64CONST(0) &&
+#endif
 		pgsp_enabled(nesting_level))
 	{
+#if PG_VERSION_NUM >= 180000
 		/*
 		 * Record initial entry now, so plan text is available for currently
 		 * running queries
@@ -832,6 +864,7 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 								 0, /* executions are counted in
 									 * pgsp_ExecutorEnd */
 								 0.0);
+#endif
 
 		/*
 		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
@@ -853,15 +886,26 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
  * ExecutorRun hook: all we need do is track nesting depth
  */
 static void
+#if PG_VERSION_NUM >= 180000
 pgsp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+#else
+pgsp_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
+#endif
 {
 	nesting_level++;
 	PG_TRY();
 	{
+#if PG_VERSION_NUM >= 180000
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count);
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
+#else
+		if (prev_ExecutorRun)
+			prev_ExecutorRun(queryDesc, direction, count, execute_once);
+		else
+			standard_ExecutorRun(queryDesc, direction, count, execute_once);
+#endif
 	}
 	PG_FINALLY();
 	{
@@ -898,9 +942,14 @@ static void
 pgsp_ExecutorEnd(QueryDesc *queryDesc)
 {
 	uint64		queryId = queryDesc->plannedstmt->queryId;
+#if PG_VERSION_NUM >= 180000
 	uint64		planId = queryDesc->plannedstmt->planId;
+#endif
 
-	if (queryId != UINT64CONST(0) && planId != UINT64CONST(0) &&
+	if (queryId != UINT64CONST(0) &&
+#if PG_VERSION_NUM >= 180000
+		planId != UINT64CONST(0) &&
+#endif
 		queryDesc->totaltime && pgsp_enabled(nesting_level))
 	{
 		/*
@@ -912,6 +961,11 @@ pgsp_ExecutorEnd(QueryDesc *queryDesc)
 		pgstat_report_plan_stats(queryDesc,
 								 1,
 								 queryDesc->totaltime->total * 1000.0 /* convert to msec */ );
+
+#if PG_VERSION_NUM < 180000
+		/* TODO: Is there a better way to do this on < PG18? */
+		pgstat_custom_report_stat(true);
+#endif
 	}
 
 	if (prev_ExecutorEnd)
@@ -979,6 +1033,44 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 			nesting_level--;
 	}
 	PG_END_TRY();
+}
+
+/* Shared memory init callbacks */
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+/* Shared memory initialization when loading module */
+static void
+pgsp_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	// TODO: Anything we need to do here?
+}
+
+static void
+pgsp_shmem_startup(void)
+{
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+#if PG_VERSION_NUM < 180000
+	StatsCustomShmemInit();
+#endif
+}
+
+static ClientAuthentication_hook_type prev_ClientAuthentication_hook = NULL;
+
+static void
+pgsp_ClientAuthentication_hook(Port *port, int status)
+{
+	if (prev_ClientAuthentication_hook)
+		prev_ClientAuthentication_hook(port, status);
+
+#if PG_VERSION_NUM < 180000
+	pgstat_custom_initialize();
+#endif
 }
 
 /*
@@ -1077,7 +1169,16 @@ _PG_init(void)
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = pgsp_ProcessUtility;
 
-	pgstat_register_kind(PGSTAT_KIND_PLANS, &plan_stats);
+#if PG_VERSION_NUM < 180000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pgsp_shmem_request;
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = pgsp_shmem_startup;
+	prev_ClientAuthentication_hook = ClientAuthentication_hook;
+	ClientAuthentication_hook = pgsp_ClientAuthentication_hook;
+#endif
+
+	pgstat_custom_register_kind(PGSTAT_KIND_PLANS, &plan_stats);
 }
 
 static bool
@@ -1092,7 +1193,13 @@ match_plans_entries(PgStatShared_HashEntry *entry, Datum match_data)
 Datum
 pg_stat_plans_reset(PG_FUNCTION_ARGS)
 {
-	pgstat_drop_matching_entries(match_plans_entries, 0);
+	/* stats kind must be registered already */
+	if (!pgstat_custom_get_kind_info(PGSTAT_KIND_PLANS))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
+
+	pgstat_custom_drop_matching_entries(match_plans_entries, 0);
 
 	/* Free plan text memory and allow cleanup of dropped entries */
 	pgstat_gc_plan_memory();
@@ -1119,7 +1226,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 	is_allowed_role = has_privs_of_role(userid, ROLE_PG_READ_ALL_STATS);
 
 	/* stats kind must be registered already */
-	if (!pgstat_get_kind_info(PGSTAT_KIND_PLANS))
+	if (!pgstat_custom_get_kind_info(PGSTAT_KIND_PLANS))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
@@ -1127,7 +1234,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStat_StatPlanEntry *statent;
@@ -1141,7 +1248,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
 
-		statent = pgstat_get_entry_data(p->key.kind, dsa_get_address(pgStatLocal.dsa, p->body));
+		statent = pgstat_custom_get_entry_data(p->key.kind, dsa_get_address(pgStatCustomLocal.dsa, p->body));
 
 		values[i++] = ObjectIdGetDatum(statent->info.userid);
 		values[i++] = ObjectIdGetDatum(p->key.dboid);
@@ -1164,7 +1271,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 
 		if (showplan && (is_allowed_role || statent->info.userid == userid))
 		{
-			char	   *pstr = DsaPointerIsValid(statent->info.plan_text) ? dsa_get_address(pgStatLocal.dsa, statent->info.plan_text) : NULL;
+			char	   *pstr = DsaPointerIsValid(statent->info.plan_text) ? dsa_get_address(pgStatCustomLocal.dsa, statent->info.plan_text) : NULL;
 
 			if (pstr)
 			{
@@ -1205,6 +1312,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 Datum
 pg_stat_plans_2_0_get_activity(PG_FUNCTION_ARGS)
 {
+#if PG_VERSION_NUM >= 180000
 #define PG_STAT_PLANS_GET_ACTIVITY_COLS	5
 	int			num_backends = pgstat_fetch_stat_numbackends();
 	int			curr_backend;
@@ -1269,6 +1377,9 @@ pg_stat_plans_2_0_get_activity(PG_FUNCTION_ARGS)
 		if (pid != -1)
 			break;
 	}
+#else
+	elog(ERROR, "Not implemented, use of pg_stat_plans_get_activity requires Postgres 18+");
+#endif
 
 	return (Datum) 0;
 }

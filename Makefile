@@ -3,8 +3,9 @@
 MODULE_big = pg_stat_plans
 OBJS = \
 	$(WIN32RES) \
-	jumblefuncs.o \
-	pg_stat_plans.o
+	pg_stat_plans.o \
+	pgstat_custom.o \
+	jumblefuncs.o
 
 EXTENSION = pg_stat_plans
 DATA = pg_stat_plans--2.0.sql

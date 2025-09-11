@@ -29,16 +29,22 @@
 static JumbleState *InitJumbleInternal(bool record_clocations);
 static void AppendJumbleInternal(JumbleState *jstate,
 								 const unsigned char *value, Size size);
-static void FlushPendingNulls(JumbleState *jstate);
 static void RecordConstLocation(JumbleState *jstate,
 								int location, bool squashed);
 static void _jumbleElements(JumbleState *jstate, List *elements);
 static void _jumbleA_Const(JumbleState *jstate, Node *node);
 static void _jumbleList(JumbleState *jstate, Node *node);
 static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
+#if PG_VERSION_NUM < 170000
+static void _jumbleRangeTblEntry(JumbleState *jstate, Node *node);
+#endif
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+
+#if PG_VERSION_NUM >= 180000
+static void FlushPendingNulls(JumbleState *jstate);
+#endif
 
 /*
  * InitJumbleInternal
@@ -69,9 +75,11 @@ InitJumbleInternal(bool record_clocations)
 
 	jstate->clocations_count = 0;
 	jstate->highest_extern_param_id = 0;
+#if PG_VERSION_NUM >= 180000
 	jstate->pending_nulls = 0;
 #ifdef USE_ASSERT_CHECKING
 	jstate->total_jumble_len = 0;
+#endif
 #endif
 
 	return jstate;
@@ -93,9 +101,11 @@ InitJumble()
 uint64
 HashJumbleState(JumbleState *jstate)
 {
+#if PG_VERSION_NUM >= 180000
 	/* Flush any pending NULLs before doing the final hash */
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	/* Process the jumble buffer and produce the hash value */
 	return DatumGetUInt64(hash_any_extended(jstate->jumble,
@@ -128,8 +138,10 @@ AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 		memcpy(jumble + jumble_len, item, size);
 		jstate->jumble_len += size;
 
+#if PG_VERSION_NUM >= 180000
 #ifdef USE_ASSERT_CHECKING
 		jstate->total_jumble_len += size;
+#endif
 #endif
 
 		return;
@@ -159,8 +171,10 @@ AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 		item += part_size;
 		size -= part_size;
 
+#if PG_VERSION_NUM >= 180000
 #ifdef USE_ASSERT_CHECKING
 		jstate->total_jumble_len += part_size;
+#endif
 #endif
 	} while (size > 0);
 
@@ -174,12 +188,15 @@ AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 static pg_noinline void
 AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
 {
+#if PG_VERSION_NUM >= 180000
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	AppendJumbleInternal(jstate, value, size);
 }
 
+#if PG_VERSION_NUM >= 180000
 /*
  * AppendJumbleNull
  *		For jumbling NULL pointers
@@ -189,6 +206,7 @@ AppendJumbleNull(JumbleState *jstate)
 {
 	jstate->pending_nulls++;
 }
+#endif
 
 /*
  * AppendJumble8
@@ -197,8 +215,10 @@ AppendJumbleNull(JumbleState *jstate)
 static pg_noinline void
 AppendJumble8(JumbleState *jstate, const unsigned char *value)
 {
+#if PG_VERSION_NUM >= 180000
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	AppendJumbleInternal(jstate, value, 1);
 }
@@ -211,8 +231,10 @@ AppendJumble8(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble16(JumbleState *jstate, const unsigned char *value)
 {
+#if PG_VERSION_NUM >= 180000
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	AppendJumbleInternal(jstate, value, 2);
 }
@@ -225,8 +247,10 @@ AppendJumble16(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble32(JumbleState *jstate, const unsigned char *value)
 {
+#if PG_VERSION_NUM >= 180000
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	AppendJumbleInternal(jstate, value, 4);
 }
@@ -239,12 +263,15 @@ AppendJumble32(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble64(JumbleState *jstate, const unsigned char *value)
 {
+#if PG_VERSION_NUM >= 180000
 	if (jstate->pending_nulls > 0)
 		FlushPendingNulls(jstate);
+#endif
 
 	AppendJumbleInternal(jstate, value, 8);
 }
 
+#if PG_VERSION_NUM >= 180000
 /*
  * FlushPendingNulls
  *		Incorporate the pending_nulls value into the jumble buffer.
@@ -260,7 +287,7 @@ FlushPendingNulls(JumbleState *jstate)
 						 (const unsigned char *) &jstate->pending_nulls, 4);
 	jstate->pending_nulls = 0;
 }
-
+#endif
 
 /*
  * Record location of constant within query string of query tree that is
@@ -291,7 +318,9 @@ RecordConstLocation(JumbleState *jstate, int location, bool squashed)
 		}
 		jstate->clocations[jstate->clocations_count].location = location;
 		/* initialize lengths to -1 to simplify third-party module usage */
+#if PG_VERSION_NUM >= 180000
 		jstate->clocations[jstate->clocations_count].squashed = squashed;
+#endif
 		jstate->clocations[jstate->clocations_count].length = -1;
 		jstate->clocations_count++;
 	}
@@ -397,6 +426,7 @@ do { \
 	else \
 		AppendJumble(jstate, (const unsigned char *) &(expr->item), sizeof(expr->item)); \
 } while (0)
+#if PG_VERSION_NUM >= 180000
 #define JUMBLE_STRING(str) \
 do { \
 	if (expr->str) \
@@ -404,6 +434,13 @@ do { \
 	else \
 		AppendJumbleNull(jstate); \
 } while(0)
+#else
+#define JUMBLE_STRING(str) \
+do { \
+	if (expr->str) \
+		AppendJumble(jstate, (const unsigned char *) (expr->str), strlen(expr->str) + 1); \
+} while(0)
+#endif
 /* Function name used for the node field attribute custom_query_jumble. */
 #define JUMBLE_CUSTOM(nodetype, item) \
 	_jumble##nodetype##_##item(jstate, expr, expr->item)
@@ -419,7 +456,15 @@ do { \
 		AppendJumble(jstate, (const unsigned char *) expr->item, sizeof(*(expr->item)) * len); \
 } while(0)
 
-#include "jumblefuncs.funcs.c"
+#if PG_VERSION_NUM >= 180000
+#include "pg18_jumblefuncs.funcs.c"
+#elif PG_VERSION_NUM >= 170000
+#include "pg17_jumblefuncs.funcs.c"
+#elif PG_VERSION_NUM >= 160000
+#include "pg16_jumblefuncs.funcs.c"
+#else
+#error "Unsupported Postgres version - Postgres 16 or newer required"
+#endif
 
 /*
  * We jumble lists of constant elements as one individual item regardless
@@ -461,13 +506,17 @@ void
 JumbleNode(JumbleState *jstate, Node *node)
 {
 	Node	   *expr = node;
+#if PG_VERSION_NUM >= 180000
 #ifdef USE_ASSERT_CHECKING
 	Size		prev_jumble_len = jstate->total_jumble_len;
+#endif
 #endif
 
 	if (expr == NULL)
 	{
+#if PG_VERSION_NUM >= 180000
 		AppendJumbleNull(jstate);
+#endif
 		return;
 	}
 
@@ -482,7 +531,15 @@ JumbleNode(JumbleState *jstate, Node *node)
 
 	switch (nodeTag(expr))
 	{
-#include "jumblefuncs.switch.c"
+#if PG_VERSION_NUM >= 180000
+#include "pg18_jumblefuncs.switch.c"
+#elif PG_VERSION_NUM >= 170000
+#include "pg17_jumblefuncs.switch.c"
+#elif PG_VERSION_NUM >= 160000
+#include "pg16_jumblefuncs.switch.c"
+#else
+#error "Unsupported Postgres version - Postgres 16 or newer required"
+#endif
 
 		case T_List:
 		case T_IntList:
@@ -518,8 +575,10 @@ JumbleNode(JumbleState *jstate, Node *node)
 			break;
 	}
 
+#if PG_VERSION_NUM >= 180000
 	/* Ensure we added something to the jumble buffer */
 	Assert(jstate->total_jumble_len > prev_jumble_len);
+#endif
 }
 
 static void
@@ -587,6 +646,57 @@ _jumbleA_Const(JumbleState *jstate, Node *node)
 	}
 }
 
+#if PG_VERSION_NUM < 170000
+static void
+_jumbleRangeTblEntry(JumbleState *jstate, Node *node)
+{
+	RangeTblEntry *expr = (RangeTblEntry *) node;
+
+	JUMBLE_FIELD(rtekind);
+	switch (expr->rtekind)
+	{
+		case RTE_RELATION:
+			JUMBLE_FIELD(relid);
+			JUMBLE_NODE(tablesample);
+			JUMBLE_FIELD(inh);
+			break;
+		case RTE_SUBQUERY:
+			JUMBLE_NODE(subquery);
+			break;
+		case RTE_JOIN:
+			JUMBLE_FIELD(jointype);
+			break;
+		case RTE_FUNCTION:
+			JUMBLE_NODE(functions);
+			break;
+		case RTE_TABLEFUNC:
+			JUMBLE_NODE(tablefunc);
+			break;
+		case RTE_VALUES:
+			JUMBLE_NODE(values_lists);
+			break;
+		case RTE_CTE:
+
+			/*
+			 * Depending on the CTE name here isn't ideal, but it's the only
+			 * info we have to identify the referenced WITH item.
+			 */
+			JUMBLE_STRING(ctename);
+			JUMBLE_FIELD(ctelevelsup);
+			break;
+		case RTE_NAMEDTUPLESTORE:
+			JUMBLE_STRING(enrname);
+			break;
+		case RTE_RESULT:
+			break;
+		default:
+			elog(ERROR, "unrecognized RTE kind: %d", (int) expr->rtekind);
+			break;
+	}
+}
+#endif
+
+#if PG_VERSION_NUM >= 180000
 static void
 _jumbleVariableSetStmt(JumbleState *jstate, Node *node)
 {
@@ -604,6 +714,7 @@ _jumbleVariableSetStmt(JumbleState *jstate, Node *node)
 	JUMBLE_FIELD(is_local);
 	JUMBLE_LOCATION(location);
 }
+#endif
 
 /*
  * Custom query jumble function for RangeTblEntry.eref.
