@@ -187,11 +187,7 @@ static const PgStat_KindInfo plan_stats = {
 /*
  * Kind ID reserved for statistics of plans.
  */
-#if PG_VERSION_NUM >= 180000
-#define PGSTAT_KIND_PLANS	PGSTAT_KIND_EXPERIMENTAL	/* TODO: Assign */
-#else
-#define PGSTAT_KIND_PLANS	24	/* TODO: Assign */
-#endif
+#define PGSTAT_KIND_PLANS	27
 
 /*
  * Callback for stats handling
