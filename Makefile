@@ -4,7 +4,6 @@ MODULE_big = pg_stat_plans
 OBJS = \
 	$(WIN32RES) \
 	pg_stat_plans.o \
-	pgstat_custom.o \
 	jumblefuncs.o
 
 EXTENSION = pg_stat_plans
@@ -19,5 +18,16 @@ REGRESS = select activity privileges cleanup
 PG_CFLAGS = $(shell pkg-config --cflags libzstd)
 PG_LDFLAGS = $(shell pkg-config --libs libzstd)
 PG_CONFIG = pg_config
+
+ifneq (,$(findstring PostgreSQL 16,$(shell $(PG_CONFIG) --version)))
+	REGRESS_OPTS += --expecteddir=$(PWD)/compat_16_17
+	OBJS += compat_16_17/pgstat_custom.o
+endif
+
+ifneq (,$(findstring PostgreSQL 17,$(shell $(PG_CONFIG) --version)))
+	REGRESS_OPTS += --expecteddir=$(PWD)/compat_16_17
+	OBJS += compat_16_17/pgstat_custom.o
+endif
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
