@@ -29,9 +29,9 @@
 static JumbleState *InitJumbleInternal(bool record_clocations);
 static void AppendJumbleInternal(JumbleState *jstate,
 								 const unsigned char *value, Size size);
-static void RecordConstLocation(JumbleState *jstate,
-								int location, bool squashed);
+#if PG_VERSION_NUM >= 180000
 static void _jumbleElements(JumbleState *jstate, List *elements);
+#endif
 static void _jumbleA_Const(JumbleState *jstate, Node *node);
 static void _jumbleList(JumbleState *jstate, Node *node);
 static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
@@ -290,43 +290,8 @@ FlushPendingNulls(JumbleState *jstate)
 }
 #endif
 
-/*
- * Record location of constant within query string of query tree that is
- * currently being walked.
- *
- * 'squashed' signals that the constant represents the first or the last
- * element in a series of merged constants, and everything but the first/last
- * element contributes nothing to the jumble hash.
- */
-static void
-RecordConstLocation(JumbleState *jstate, int location, bool squashed)
-{
-	/* Skip if the caller is a plugin not interested in constant locations */
-	if (jstate->clocations == NULL)
-		return;
 
-	/* -1 indicates unknown or undefined location */
-	if (location >= 0)
-	{
-		/* enlarge array if needed */
-		if (jstate->clocations_count >= jstate->clocations_buf_size)
-		{
-			jstate->clocations_buf_size *= 2;
-			jstate->clocations = (LocationLen *)
-				repalloc(jstate->clocations,
-						 jstate->clocations_buf_size *
-						 sizeof(LocationLen));
-		}
-		jstate->clocations[jstate->clocations_count].location = location;
-		/* initialize lengths to -1 to simplify third-party module usage */
 #if PG_VERSION_NUM >= 180000
-		jstate->clocations[jstate->clocations_count].squashed = squashed;
-#endif
-		jstate->clocations[jstate->clocations_count].length = -1;
-		jstate->clocations_count++;
-	}
-}
-
 /*
  * Subroutine for _jumbleElements: Verify a few simple cases where we can
  * deduce that the expression is a constant:
@@ -407,13 +372,15 @@ IsSquashableConstList(List *elements, Node **firstExpr, Node **lastExpr)
 
 	return true;
 }
+#endif
 
 #define JUMBLE_NODE(item) \
 	JumbleNode(jstate, (Node *) expr->item)
+#if PG_VERSION_NUM >= 180000
 #define JUMBLE_ELEMENTS(list) \
 	_jumbleElements(jstate, (List *) expr->list)
-#define JUMBLE_LOCATION(location) \
-	RecordConstLocation(jstate, expr->location, false)
+#endif
+#define JUMBLE_LOCATION(location) // Intentionally not recording location
 #define JUMBLE_FIELD(item) \
 do { \
 	if (sizeof(expr->item) == 8) \
@@ -467,6 +434,7 @@ do { \
 #error "Unsupported Postgres version - Postgres 16 or newer required"
 #endif
 
+#if PG_VERSION_NUM >= 180000
 /*
  * We jumble lists of constant elements as one individual item regardless
  * of how many elements are in the list.  This means different queries
@@ -481,27 +449,13 @@ _jumbleElements(JumbleState *jstate, List *elements)
 
 	if (IsSquashableConstList(elements, &first, &last))
 	{
-		/*
-		 * If this list of elements is squashable, keep track of the location
-		 * of its first and last elements.  When reading back the locations
-		 * array, we'll see two consecutive locations with ->squashed set to
-		 * true, indicating the location of initial and final elements of this
-		 * list.
-		 *
-		 * For the limited set of cases we support now (implicit coerce via
-		 * FuncExpr, Const) it's fine to use exprLocation of the 'last'
-		 * expression, but if more complex composite expressions are to be
-		 * supported (e.g., OpExpr or FuncExpr as an explicit call), more
-		 * sophisticated tracking will be needed.
-		 */
-		RecordConstLocation(jstate, exprLocation(first), true);
-		RecordConstLocation(jstate, exprLocation(last), true);
 	}
 	else
 	{
 		JumbleNode(jstate, (Node *) elements);
 	}
 }
+#endif
 
 void
 JumbleNode(JumbleState *jstate, Node *node)
@@ -553,26 +507,6 @@ JumbleNode(JumbleState *jstate, Node *node)
 			/* Only a warning, since we can stumble along anyway */
 			elog(WARNING, "unrecognized node type: %d",
 				 (int) nodeTag(expr));
-			break;
-	}
-
-	/* Special cases to handle outside the automated code */
-	switch (nodeTag(expr))
-	{
-		case T_Param:
-			{
-				Param	   *p = (Param *) node;
-
-				/*
-				 * Update the highest Param id seen, in order to start
-				 * normalization correctly.
-				 */
-				if (p->paramkind == PARAM_EXTERN &&
-					p->paramid > jstate->highest_extern_param_id)
-					jstate->highest_extern_param_id = p->paramid;
-			}
-			break;
-		default:
 			break;
 	}
 
