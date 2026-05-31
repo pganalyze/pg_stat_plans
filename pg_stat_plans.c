@@ -31,12 +31,16 @@
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "pgstat.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/pgstat_internal.h"
+#endif
 #include "storage/ipc.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
 
 #include "jumblefuncs.h"
 
@@ -772,10 +776,18 @@ pgsp_calculate_plan_id(PlannedStmt *result)
  * record query plan if needed.
  */
 static PlannedStmt *
+#if PG_VERSION_NUM >= 190000
+pgsp_planner(Query *parse,
+			 const char *query_string,
+			 int cursorOptions,
+			 ParamListInfo boundParams,
+			 ExplainState *es)
+#else
 pgsp_planner(Query *parse,
 			 const char *query_string,
 			 int cursorOptions,
 			 ParamListInfo boundParams)
+#endif
 {
 	PlannedStmt *result;
 
@@ -786,12 +798,21 @@ pgsp_planner(Query *parse,
 	nesting_level++;
 	PG_TRY();
 	{
+#if PG_VERSION_NUM >= 190000
+		if (prev_planner_hook)
+			result = prev_planner_hook(parse, query_string, cursorOptions,
+									   boundParams, es);
+		else
+			result = standard_planner(parse, query_string, cursorOptions,
+									  boundParams, es);
+#else
 		if (prev_planner_hook)
 			result = prev_planner_hook(parse, query_string, cursorOptions,
 									   boundParams);
 		else
 			result = standard_planner(parse, query_string, cursorOptions,
 									  boundParams);
+#endif
 	}
 	PG_FINALLY();
 	{
@@ -812,7 +833,11 @@ pgsp_planner(Query *parse,
  * Post-parse-analysis hook: Reset query ID to support EXECUTE statements
  */
 static void
+#if PG_VERSION_NUM >= 190000
+pgsp_post_parse_analyze(ParseState *pstate, Query *query, const JumbleState *jstate)
+#else
 pgsp_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
+#endif
 {
 	if (prev_post_parse_analyze_hook)
 		prev_post_parse_analyze_hook(pstate, query, jstate);
@@ -841,6 +866,14 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 	uint64		planId = queryDesc->plannedstmt->planId;
 #endif
 
+#if PG_VERSION_NUM >= 190000
+	/* Set up to track total elapsed time in ExecutorRun. */
+	if (queryId != UINT64CONST(0) &&
+		planId != UINT64CONST(0) &&
+		pgsp_enabled(nesting_level))
+		queryDesc->query_instr_options |= INSTRUMENT_TIMER;
+#endif
+
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
@@ -863,6 +896,7 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 								 0.0);
 #endif
 
+#if PG_VERSION_NUM < 190000
 		/*
 		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
 		 * space is allocated in the per-query context so it will go away at
@@ -876,6 +910,7 @@ pgsp_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
 			MemoryContextSwitchTo(oldcxt);
 		}
+#endif
 	}
 }
 
@@ -947,8 +982,13 @@ pgsp_ExecutorEnd(QueryDesc *queryDesc)
 #if PG_VERSION_NUM >= 180000
 		planId != UINT64CONST(0) &&
 #endif
+#if PG_VERSION_NUM >= 190000
+		queryDesc->query_instr && pgsp_enabled(nesting_level))
+#else
 		queryDesc->totaltime && pgsp_enabled(nesting_level))
+#endif
 	{
+#if PG_VERSION_NUM < 190000
 		/*
 		 * Make sure stats accumulation is done.  (Note: it's okay if several
 		 * levels of hook all do this.)
@@ -958,6 +998,11 @@ pgsp_ExecutorEnd(QueryDesc *queryDesc)
 		pgstat_report_plan_stats(queryDesc,
 								 1,
 								 queryDesc->totaltime->total * 1000.0 /* convert to msec */ );
+#else
+		pgstat_report_plan_stats(queryDesc,
+								 1,
+								 INSTR_TIME_GET_MILLISEC(queryDesc->query_instr->total));
+#endif
 
 #if PG_VERSION_NUM < 180000
 		/* TODO: Is there a better way to do this on < PG18? */

@@ -194,6 +194,7 @@ The source branches that are used for this extraction can be found here:
 | 16 | [pg-stat-plans-16](https://github.com/lfittl/postgres/tree/pg-stat-plans-16) |
 | 17 | [pg-stat-plans-17](https://github.com/lfittl/postgres/tree/pg-stat-plans-17) |
 | 18 | [pg-stat-plans-18](https://github.com/lfittl/postgres/tree/pg-stat-plans-18) |
+| 19 | [pg-stat-plans-19](https://github.com/lfittl/postgres/tree/pg-stat-plans-19) |
 
 The principles behind which fields are jumbled are [documented in the Postgres wiki](https://wiki.postgresql.org/wiki/Plan_ID_Jumbling).
 
@@ -233,10 +234,10 @@ Inspired by earlier work done by Sami Imseih.
 ## License
 
 PostgreSQL server code (jumblefuncs.*) incorporated under the PostgreSQL license<br>
-Portions Copyright (c) 1996-2025, The PostgreSQL Global Development Group<br>
+Portions Copyright (c) 1996-2026, The PostgreSQL Global Development Group<br>
 Portions Copyright (c) 1994, The Regents of the University of California
 
 All other parts are licensed under the PostgreSQL license<br>
-Copyright (c) 2025, Duboce Labs, Inc. (pganalyze) <team@pganalyze.com>
+Copyright (c) 2026, Duboce Labs, Inc. (pganalyze) <team@pganalyze.com>
 
 See LICENSE file for details.

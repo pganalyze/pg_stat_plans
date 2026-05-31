@@ -21,6 +21,8 @@ jobs:
           - pg: 16
           - pg: 17
           - pg: 18
+          - pg: 19
+            branch: master
 
     steps:
       - name: Check out code
@@ -68,7 +70,7 @@ jobs:
 
       - name: Upload regression diffs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: regression-diffs-pg${{ matrix.pg }}
           path: |
