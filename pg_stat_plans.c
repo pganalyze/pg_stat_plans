@@ -40,9 +40,7 @@
 
 #include "jumblefuncs.h"
 
-#if PG_VERSION_NUM < 180000
 #include "compat_16_17/pgstat_custom.h"
-#endif
 
 #ifdef USE_ZSTD
 #include <zstd.h>

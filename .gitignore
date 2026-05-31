@@ -29,4 +29,5 @@ lib*dll.def
 lib*.pc
 
 # Extension specific excludes
+log/
 results/*.out
