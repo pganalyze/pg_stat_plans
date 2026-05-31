@@ -57,6 +57,8 @@ jobs:
             --without-icu --without-readline --without-zlib
           make -j"$(nproc)"
           make install
+          # pg_plan_advice is needed for the plan_advice regression test
+          make -C contrib/pg_plan_advice install || true
           echo "PG_CONFIG=$PGPREFIX/bin/pg_config" >> "$GITHUB_ENV"
 
       - name: Build pg_stat_plans
