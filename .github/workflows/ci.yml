@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: 16
+          - pg: 17
+          - pg: 18
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libzstd-dev libssl-dev libkrb5-dev
+
+      - name: Install PostgreSQL ${{ matrix.pg }}
+        if: ${{ !matrix.branch }}
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
+          echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> "$GITHUB_ENV"
+
+      - name: Build PostgreSQL ${{ matrix.pg }} from ${{ matrix.branch }}
+        if: ${{ matrix.branch }}
+        env:
+          PGPREFIX: ${{ github.workspace }}/pginst
+        run: |
+          sudo apt-get install -y --no-install-recommends bison flex perl
+          git clone --depth 1 --branch ${{ matrix.branch }} \
+            https://github.com/postgres/postgres.git pgsrc
+          cd pgsrc
+          ./configure --prefix="$PGPREFIX" \
+            --enable-debug --enable-cassert \
+            --without-icu --without-readline --without-zlib
+          make -j"$(nproc)"
+          make install
+          echo "PG_CONFIG=$PGPREFIX/bin/pg_config" >> "$GITHUB_ENV"
+
+      - name: Build pg_stat_plans
+        run: make PG_CONFIG="$PG_CONFIG"
+
+      - name: Install pg_stat_plans
+        run: sudo make PG_CONFIG="$PG_CONFIG" install
+
+      - name: Run regression tests
+        run: make PG_CONFIG="$PG_CONFIG" localcheck
+
+      - name: Upload regression diffs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-diffs-pg${{ matrix.pg }}
+          path: |
+            regression.diffs
+            regression.out
+          if-no-files-found: ignore
