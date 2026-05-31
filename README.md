@@ -167,9 +167,20 @@ SELECT * FROM pg_stat_plans_activity;
 
 ## Running tests
 
-You can use `make installcheck` to run the regression tests.
+The built-in regression tests can be run by doing:
 
-Note that these will run against an existing local Postgres installation, which must have `pg_stat_plans` in its `shared_preload_libaries`.
+```
+make install
+make localcheck
+```
+
+The `make localcheck` command runs the regression tests in a throwaway temporary
+instance, so it needs no separately running server. The extension must be installed
+first. Use `sudo make install` for system-wide Postgres installed using packages.
+
+Alternatively, you can use `make installcheck` to test against an already-running
+local Postgres that has `pg_stat_plans` in its `shared_preload_libraries`.
+
 
 ## Configuration
 
