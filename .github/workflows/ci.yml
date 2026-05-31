@@ -41,7 +41,7 @@ jobs:
             postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
           echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> "$GITHUB_ENV"
 
-      - name: Build PostgreSQL ${{ matrix.pg }} from ${{ matrix.branch }}
+      - name: Build PostgreSQL from source
         if: ${{ matrix.branch }}
         env:
           PGPREFIX: ${{ github.workspace }}/pginst

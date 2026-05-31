@@ -243,7 +243,7 @@ pgsp_explain_plan(QueryDesc *queryDesc)
 }
 
 static void
-pgstat_gc_plan_memory()
+pgstat_gc_plan_memory(void)
 {
 	dshash_seq_status hstat;
 	PgStatShared_HashEntry *p;
@@ -310,7 +310,7 @@ entry_cmp_lru(const union ListCell *lhs, const union ListCell *rhs)
 }
 
 static void
-pgstat_dealloc_plans()
+pgstat_dealloc_plans(void)
 {
 	dshash_seq_status hstat;
 	PgStatShared_HashEntry *p;
@@ -377,7 +377,7 @@ pgstat_dealloc_plans()
 }
 
 static void
-pgstat_gc_plans()
+pgstat_gc_plans(void)
 {
 	dshash_seq_status hstat;
 	PgStatShared_HashEntry *p;
@@ -1032,6 +1032,7 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 }
 
+#if PG_VERSION_NUM < 180000
 /* Shared memory init callbacks */
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -1052,9 +1053,7 @@ pgsp_shmem_startup(void)
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
-#if PG_VERSION_NUM < 180000
 	StatsCustomShmemInit();
-#endif
 }
 
 static ClientAuthentication_hook_type prev_ClientAuthentication_hook = NULL;
@@ -1065,10 +1064,9 @@ pgsp_ClientAuthentication_hook(Port *port, int status)
 	if (prev_ClientAuthentication_hook)
 		prev_ClientAuthentication_hook(port, status);
 
-#if PG_VERSION_NUM < 180000
 	pgstat_custom_initialize();
-#endif
 }
+#endif
 
 /*
  * Module load callback

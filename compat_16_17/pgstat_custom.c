@@ -128,43 +128,10 @@ static bool pgstat_custom_is_shutdown = false;
  */
 static const PgStat_KindInfo **pgstat_kind_custom_infos = NULL;
 
-
 /*
- * pgstat_before_server_shutdown() needs to be called by exactly one process
- * during regular server shutdowns. Otherwise all stats will be lost.
- *
- * We currently only write out stats for proc_exit(0). We might want to change
- * that at some point... But right now pgstat_discard_stats() would be called
- * during the start after a disorderly shutdown, anyway.
+ * Note there is no equivalent to pgstat_before_server_shutdown due to missing
+ * hooks to set up an equivalent. Therefore all custom stats are lost on shutdown.
  */
-static void
-pgstat_custom_before_server_shutdown(int code, Datum arg)
-{
-	Assert(pgStatCustomLocal.shmem != NULL);
-	Assert(!pgStatCustomLocal.shmem->is_shutdown);
-
-	/*
-	 * Stats should only be reported after pgstat_custom_initialize() and before
-	 * pgstat_custom_shutdown(). This is a convenient point to catch most violations
-	 * of this rule.
-	 */
-	Assert(pgstat_custom_is_initialized && !pgstat_custom_is_shutdown);
-
-	/* flush out our own pending changes before writing out */
-	pgstat_custom_report_stat(true);
-
-	/*
-	 * Only write out file during normal shutdown. Don't even signal that
-	 * we've shutdown during irregular shutdowns, because the shutdown
-	 * sequence isn't coordinated to ensure this backend shuts down last.
-	 */
-	if (code == 0)
-	{
-		pgStatCustomLocal.shmem->is_shutdown = true;
-		/*pgstat_write_statsfile();*/
-	}
-}
-
 
 /* ------------------------------------------------------------
  * Backend initialization / shutdown functions

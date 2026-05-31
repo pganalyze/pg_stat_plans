@@ -37,10 +37,11 @@ static void _jumbleList(JumbleState *jstate, Node *node);
 static void _jumbleVariableSetStmt(JumbleState *jstate, Node *node);
 #if PG_VERSION_NUM < 170000
 static void _jumbleRangeTblEntry(JumbleState *jstate, Node *node);
-#endif
+#elif PG_VERSION_NUM >= 180000
 static void _jumbleRangeTblEntry_eref(JumbleState *jstate,
 									  RangeTblEntry *rte,
 									  Alias *expr);
+#endif
 
 #if PG_VERSION_NUM >= 180000
 static void FlushPendingNulls(JumbleState *jstate);
@@ -90,7 +91,7 @@ InitJumbleInternal(bool record_clocations)
  * nodes, but does not record constant locations, for now.
  */
 JumbleState *
-InitJumble()
+InitJumble(void)
 {
 	return InitJumbleInternal(false);
 }
@@ -694,6 +695,22 @@ _jumbleRangeTblEntry(JumbleState *jstate, Node *node)
 			break;
 	}
 }
+#elif PG_VERSION_NUM >= 180000
+/*
+ * Custom query jumble function for RangeTblEntry.eref.
+ */
+static void
+_jumbleRangeTblEntry_eref(JumbleState *jstate,
+						  RangeTblEntry *rte,
+						  Alias *expr)
+{
+	JUMBLE_FIELD(type);
+
+	/*
+	 * This includes only the table name, the list of column names is ignored.
+	 */
+	JUMBLE_STRING(aliasname);
+}
 #endif
 
 #if PG_VERSION_NUM >= 180000
@@ -715,22 +732,6 @@ _jumbleVariableSetStmt(JumbleState *jstate, Node *node)
 	JUMBLE_LOCATION(location);
 }
 #endif
-
-/*
- * Custom query jumble function for RangeTblEntry.eref.
- */
-static void
-_jumbleRangeTblEntry_eref(JumbleState *jstate,
-						  RangeTblEntry *rte,
-						  Alias *expr)
-{
-	JUMBLE_FIELD(type);
-
-	/*
-	 * This includes only the table name, the list of column names is ignored.
-	 */
-	JUMBLE_STRING(aliasname);
-}
 
 /*
  * Jumble the entries in the rangle table to map RT indexes to relations
