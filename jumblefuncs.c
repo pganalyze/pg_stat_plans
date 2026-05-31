@@ -30,7 +30,8 @@ static JumbleState *InitJumbleInternal(bool record_clocations);
 static void AppendJumbleInternal(JumbleState *jstate,
 								 const unsigned char *value, Size size);
 #if PG_VERSION_NUM >= 180000
-static void _jumbleElements(JumbleState *jstate, List *elements);
+static void _jumbleElements(JumbleState *jstate, List *elements, Node *node);
+static void _jumbleParam(JumbleState *jstate, Node *node);
 #endif
 static void _jumbleA_Const(JumbleState *jstate, Node *node);
 static void _jumbleList(JumbleState *jstate, Node *node);
@@ -76,6 +77,9 @@ InitJumbleInternal(bool record_clocations)
 
 	jstate->clocations_count = 0;
 	jstate->highest_extern_param_id = 0;
+#if PG_VERSION_NUM >= 180000
+	jstate->has_squashed_lists = false;
+#endif
 #if PG_VERSION_NUM >= 180000
 	jstate->pending_nulls = 0;
 #ifdef USE_ASSERT_CHECKING
@@ -296,47 +300,74 @@ FlushPendingNulls(JumbleState *jstate)
  * Subroutine for _jumbleElements: Verify a few simple cases where we can
  * deduce that the expression is a constant:
  *
- * - Ignore a possible wrapping RelabelType and CoerceViaIO.
- * - If it's a FuncExpr, check that the function is an implicit
+ * - See through any wrapping RelabelType and CoerceViaIO layers.
+ * - If it's a FuncExpr, check that the function is a builtin
  *   cast and its arguments are Const.
- * - Otherwise test if the expression is a simple Const.
+ * - Otherwise test if the expression is a simple Const or a
+ *   PARAM_EXTERN param.
  */
 static bool
-IsSquashableConst(Node *element)
+IsSquashableConstant(Node *element)
 {
-	if (IsA(element, RelabelType))
-		element = (Node *) ((RelabelType *) element)->arg;
-
-	if (IsA(element, CoerceViaIO))
-		element = (Node *) ((CoerceViaIO *) element)->arg;
-
-	if (IsA(element, FuncExpr))
+restart:
+	switch (nodeTag(element))
 	{
-		FuncExpr   *func = (FuncExpr *) element;
-		ListCell   *temp;
+		case T_RelabelType:
+			/* Unwrap RelabelType */
+			element = (Node *) ((RelabelType *) element)->arg;
+			goto restart;
 
-		if (func->funcformat != COERCE_IMPLICIT_CAST &&
-			func->funcformat != COERCE_EXPLICIT_CAST)
+		case T_CoerceViaIO:
+			/* Unwrap CoerceViaIO */
+			element = (Node *) ((CoerceViaIO *) element)->arg;
+			goto restart;
+
+		case T_Const:
+			return true;
+
+		case T_Param:
+			return castNode(Param, element)->paramkind == PARAM_EXTERN;
+
+		case T_FuncExpr:
+			{
+				FuncExpr   *func = (FuncExpr *) element;
+				ListCell   *temp;
+
+				if (func->funcformat != COERCE_IMPLICIT_CAST &&
+					func->funcformat != COERCE_EXPLICIT_CAST)
+					return false;
+
+				if (func->funcid > FirstGenbkiObjectId)
+					return false;
+
+				/*
+				 * We can check function arguments recursively, being careful
+				 * about recursing too deep.  At each recursion level it's
+				 * enough to test the stack on the first element.  (Note that
+				 * I wasn't able to hit this without bloating the stack
+				 * artificially in this function: the parser errors out before
+				 * stack size becomes a problem here.)
+				 */
+				foreach(temp, func->args)
+				{
+					Node	   *arg = lfirst(temp);
+
+					if (!IsA(arg, Const))
+					{
+						if (foreach_current_index(temp) == 0 &&
+							stack_is_too_deep())
+							return false;
+						else if (!IsSquashableConstant(arg))
+							return false;
+					}
+				}
+
+				return true;
+			}
+
+		default:
 			return false;
-
-		if (func->funcid > FirstGenbkiObjectId)
-			return false;
-
-		foreach(temp, func->args)
-		{
-			Node	   *arg = lfirst(temp);
-
-			if (!IsA(arg, Const))	/* XXX we could recurse here instead */
-				return false;
-		}
-
-		return true;
 	}
-
-	if (!IsA(element, Const))
-		return false;
-
-	return true;
 }
 
 /*
@@ -346,29 +377,23 @@ IsSquashableConst(Node *element)
  * Return value indicates if squashing is possible.
  *
  * Note that this function searches only for explicit Const nodes with
- * possibly very simple decorations on top, and does not try to simplify
- * expressions.
+ * possibly very simple decorations on top and PARAM_EXTERN parameters,
+ * and does not try to simplify expressions.
  */
 static bool
-IsSquashableConstList(List *elements, Node **firstExpr, Node **lastExpr)
+IsSquashableConstantList(List *elements)
 {
 	ListCell   *temp;
 
-	/*
-	 * If squashing is disabled, or the list is too short, we don't try to
-	 * squash it.
-	 */
+	/* If the list is too short, we don't try to squash it. */
 	if (list_length(elements) < 2)
 		return false;
 
 	foreach(temp, elements)
 	{
-		if (!IsSquashableConst(lfirst(temp)))
+		if (!IsSquashableConstant(lfirst(temp)))
 			return false;
 	}
-
-	*firstExpr = linitial(elements);
-	*lastExpr = llast(elements);
 
 	return true;
 }
@@ -377,8 +402,8 @@ IsSquashableConstList(List *elements, Node **firstExpr, Node **lastExpr)
 #define JUMBLE_NODE(item) \
 	JumbleNode(jstate, (Node *) expr->item)
 #if PG_VERSION_NUM >= 180000
-#define JUMBLE_ELEMENTS(list) \
-	_jumbleElements(jstate, (List *) expr->list)
+#define JUMBLE_ELEMENTS(list, node) \
+	_jumbleElements(jstate, (List *) expr->list, node)
 #endif
 #define JUMBLE_LOCATION(location) // Intentionally not recording location
 #define JUMBLE_FIELD(item) \
@@ -436,24 +461,49 @@ do { \
 
 #if PG_VERSION_NUM >= 180000
 /*
- * We jumble lists of constant elements as one individual item regardless
- * of how many elements are in the list.  This means different queries
- * jumble to the same query_id, if the only difference is the number of
- * elements in the list.
+ * We try to jumble lists of expressions as one individual item regardless
+ * of how many elements are in the list. This is know as squashing, which
+ * results in different queries jumbling to the same query_id, if the only
+ * difference is the number of elements in the list.
+ *
+ * We allow constants and PARAM_EXTERN parameters to be squashed. To normalize
+ * such queries, we use the start and end locations of the list of elements in
+ * a list.
  */
 static void
-_jumbleElements(JumbleState *jstate, List *elements)
+_jumbleElements(JumbleState *jstate, List *elements, Node *node)
 {
-	Node	   *first,
-			   *last;
+	bool		normalize_list = false;
 
-	if (IsSquashableConstList(elements, &first, &last))
+	if (IsSquashableConstantList(elements))
 	{
+		if (IsA(node, ArrayExpr))
+		{
+			ArrayExpr  *aexpr = (ArrayExpr *) node;
+
+			if (aexpr->list_start > 0 && aexpr->list_end > 0)
+			{
+				normalize_list = true;
+				jstate->has_squashed_lists = true;
+			}
+		}
 	}
-	else
+
+	if (!normalize_list)
 	{
 		JumbleNode(jstate, (Node *) elements);
 	}
+}
+
+static void
+_jumbleParam(JumbleState *jstate, Node *node)
+{
+	Param	   *expr = (Param *) node;
+
+	JUMBLE_FIELD(paramkind);
+	JUMBLE_FIELD(paramid);
+	JUMBLE_FIELD(paramtype);
+	/* paramtypmod and paramcollid are ignored */
 }
 #endif
 

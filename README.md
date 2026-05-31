@@ -181,6 +181,28 @@ first. Use `sudo make install` for system-wide Postgres installed using packages
 Alternatively, you can use `make installcheck` to test against an already-running
 local Postgres that has `pg_stat_plans` in its `shared_preload_libraries`.
 
+## Regenerating the plan jumble support
+
+The `pg*_jumblefuncs.*.c` files included by `jumblefuncs.c` are generated using
+`src/backend/nodes/gen_node_support.pl` helper in the Postgres source tree, with
+modifications applied to jumble (i.e. hash) Plan trees and calculate the plan ID.
+
+The source branches that are used for this extraction can be found here:
+
+| PostgreSQL | Branch |
+|------------|--------|
+| 16 | [pg-stat-plans-16](https://github.com/lfittl/postgres/tree/pg-stat-plans-16) |
+| 17 | [pg-stat-plans-17](https://github.com/lfittl/postgres/tree/pg-stat-plans-17) |
+| 18 | [pg-stat-plans-18](https://github.com/lfittl/postgres/tree/pg-stat-plans-18) |
+
+The principles behind which fields are jumbled are [documented in the Postgres wiki](https://wiki.postgresql.org/wiki/Plan_ID_Jumbling).
+
+To regenerate the files, run the following, pointing to a local checkout of the right
+branch, and using the correct prefix to be used for the files:
+
+```
+./generate_jumblefuncs.sh pg18 /path/to/postgres
+```
 
 ## Configuration
 
