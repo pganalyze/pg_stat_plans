@@ -1,0 +1,180 @@
+--
+-- pg_plan_advice string collection (Postgres 19+ only)
+--
+-- This test is only run when pg_plan_advice is available and preloaded
+-- alongside pg_stat_plans (see the Makefile). The extension was already
+-- created by the "select" test.
+--
+-- Disable parallelism so the chosen plans (and thus the generated advice)
+-- are deterministic.
+SET max_parallel_workers_per_gather = 0;
+CREATE TABLE pa_t1(id int primary key, x int);
+CREATE TABLE pa_t2(id int primary key, t1_id int);
+INSERT INTO pa_t1 SELECT g, g FROM generate_series(1, 1000) g;
+INSERT INTO pa_t2 SELECT g, g % 1000 + 1 FROM generate_series(1, 5000) g;
+ANALYZE pa_t1, pa_t2;
+--
+-- off: advice is never collected, even on repeated execution
+--
+SET pg_stat_plans.plan_advice = 'off';
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT count(*) FROM pa_t1 WHERE x < 100;
+ count 
+-------
+    99
+(1 row)
+
+SELECT count(*) FROM pa_t1 WHERE x < 100;
+ count 
+-------
+    99
+(1 row)
+
+SELECT plan_advice IS NULL AS advice_is_null
+  FROM pg_stat_plans WHERE plan LIKE '%pa_t1%' AND plan NOT LIKE '%pg_stat_plans%';
+ advice_is_null 
+----------------
+ t
+(1 row)
+
+--
+-- always: advice is collected on the first execution
+--
+SET pg_stat_plans.plan_advice = 'always';
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT count(*) FROM pa_t1 WHERE x < 100;
+ count 
+-------
+    99
+(1 row)
+
+SELECT plan_advice IS NOT NULL AS advice_present
+  FROM pg_stat_plans WHERE plan LIKE '%pa_t1%' AND plan NOT LIKE '%pg_stat_plans%';
+ advice_present 
+----------------
+ t
+(1 row)
+
+--
+-- delayed: no advice on the first occurrence of a query id, collected on the
+-- second. The set of query ids still missing advice lives in shared memory,
+-- so a second execution on any connection captures it; here we use a single
+-- connection, where the second execution re-plans the query.
+--
+SET pg_stat_plans.plan_advice = 'delayed';
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+SELECT count(*) FROM pa_t1 t1 JOIN pa_t2 t2 ON t2.t1_id = t1.id WHERE t1.x < 100;
+ count 
+-------
+   495
+(1 row)
+
+SELECT plan_advice IS NULL AS advice_is_null_first_occurrence
+  FROM pg_stat_plans WHERE plan LIKE '%pa_t2%' AND plan NOT LIKE '%pg_stat_plans%';
+ advice_is_null_first_occurrence 
+---------------------------------
+ t
+(1 row)
+
+SELECT count(*) FROM pa_t1 t1 JOIN pa_t2 t2 ON t2.t1_id = t1.id WHERE t1.x < 100;
+ count 
+-------
+   495
+(1 row)
+
+SELECT plan_advice IS NOT NULL AS advice_present_second_occurrence
+  FROM pg_stat_plans WHERE plan LIKE '%pa_t2%' AND plan NOT LIKE '%pg_stat_plans%';
+ advice_present_second_occurrence 
+----------------------------------
+ t
+(1 row)
+
+--
+-- delayed: an alternate plan for the same query id is handled independently.
+-- After the first plan's advice is captured, a different plan for the same
+-- query id starts over: no advice on its first occurrence, captured on its
+-- second, while the original plan keeps its advice.
+--
+SET pg_stat_plans.plan_advice = 'delayed';
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+-- first plan (index scan): captured on its second execution
+SELECT count(*) FROM pa_t1 WHERE id = 500;
+ count 
+-------
+     1
+(1 row)
+
+SELECT count(*) FROM pa_t1 WHERE id = 500;
+ count 
+-------
+     1
+(1 row)
+
+-- force an alternate plan (sequential scan) for the same query id
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexonlyscan = off;
+SELECT count(*) FROM pa_t1 WHERE id = 500;
+ count 
+-------
+     1
+(1 row)
+
+-- alternate plan has no advice yet; the original plan still does
+SELECT plan LIKE '%Seq Scan%' AS alternate_plan, plan_advice IS NOT NULL AS advice_present
+  FROM pg_stat_plans
+  WHERE plan LIKE '%pa_t1%' AND plan NOT LIKE '%pg_stat_plans%'
+  ORDER BY alternate_plan;
+ alternate_plan | advice_present 
+----------------+----------------
+ f              | t
+ t              | f
+(2 rows)
+
+-- on the alternate plan's second occurrence, it too gets advice
+SELECT count(*) FROM pa_t1 WHERE id = 500;
+ count 
+-------
+     1
+(1 row)
+
+SELECT plan LIKE '%Seq Scan%' AS alternate_plan, plan_advice IS NOT NULL AS advice_present
+  FROM pg_stat_plans
+  WHERE plan LIKE '%pa_t1%' AND plan NOT LIKE '%pg_stat_plans%'
+  ORDER BY alternate_plan;
+ alternate_plan | advice_present 
+----------------+----------------
+ f              | t
+ t              | t
+(2 rows)
+
+SET enable_indexscan = on;
+SET enable_bitmapscan = on;
+SET enable_indexonlyscan = on;
+DROP TABLE pa_t1, pa_t2;
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+

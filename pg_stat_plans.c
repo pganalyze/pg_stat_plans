@@ -28,11 +28,13 @@
 #include "lib/dshash.h"
 #include "libpq/auth.h"
 #include "mb/pg_wchar.h"
+#include "nodes/parsenodes.h"
 #include "nodes/queryjumble.h"
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "pgstat.h"
 #if PG_VERSION_NUM >= 190000
+#include "storage/dsm_registry.h"
 #include "utils/pgstat_internal.h"
 #endif
 #include "storage/ipc.h"
@@ -102,12 +104,30 @@ static const struct config_enum_entry compress_options[] =
 	{NULL, 0, false}
 };
 
+typedef enum
+{
+	PGSP_ADVICE_OFF,			/* never collect pg_plan_advice strings */
+	PGSP_ADVICE_ALWAYS,			/* collect advice for every tracked plan */
+	PGSP_ADVICE_DELAYED,		/* collect advice only on the second occurrence
+								 * of a query id, using cross-connection
+								 * tracking (Postgres 19+ only) */
+}			PGSPAdviceMode;
+
+static const struct config_enum_entry advice_options[] =
+{
+	{"off", PGSP_ADVICE_OFF, false},
+	{"always", PGSP_ADVICE_ALWAYS, false},
+	{"delayed", PGSP_ADVICE_DELAYED, false},
+	{NULL, 0, false}
+};
+
 static int	pgsp_max = 5000;	/* max # plans to track */
 static int	pgsp_max_size = 8192;	/* max size of plan text to track (in
 									 * bytes) */
 static int	pgsp_track = PGSP_TRACK_TOP;	/* tracking level */
 static int	pgsp_compress = PGSP_COMPRESS_NONE; /* compression type */
 static int	pgsp_max_plan_memory = 16384;	/* plan text DSA size limit, in KB */
+static int	pgsp_plan_advice = PGSP_ADVICE_OFF; /* pg_plan_advice collection */
 
 /*
  * Module shared state, provisioned via the DSM registry (PG18+) or the shmem
@@ -169,6 +189,10 @@ typedef struct PgStatShared_PlanInfo
 										 * truncated due to text size limit */
 	int			plan_text_compression;	/* plan compression used */
 	int			plan_encoding;	/* plan text encoding */
+
+	dsa_pointer plan_advice;	/* DSA memory containing the pg_plan_advice
+								 * string (Postgres 19+), or InvalidDsaPointer */
+	size_t		plan_advice_size;	/* size of stored advice (incl. NUL) */
 }			PgStatShared_PlanInfo;
 
 typedef struct PgStat_StatPlanEntry
@@ -386,10 +410,10 @@ pgsp_dealloc_entries(void)
 		PgStatShared_HashEntry *p;
 
 		/*
-		 * Free the plan text before dropping the entry. If we left it for
-		 * pgstat_gc_plan_memory() to free later, a concurrent resurrection of
-		 * the entry by pgstat_reinit_entry() could cause a query text leak,
-		 * since reinit does a memset and through that zeroes our DSA pointer.
+		 * Free the plan text (and any advice string) before dropping the entry.
+		 * If we left it for pgsp_dealloc_release() to free later, a concurrent
+		 * resurrection of the entry by pgstat_reinit_entry() could cause a leak,
+		 * since reinit does a memset and through that zeroes our DSA pointers.
 		 */
 		p = dshash_find(pgStatCustomLocal.shared_hash, &entry->key, true);
 		if (p != NULL)
@@ -404,6 +428,11 @@ pgsp_dealloc_entries(void)
 			{
 				dsa_free(pgsp_plan_dsa, statent->info.plan_text);
 				statent->info.plan_text = InvalidDsaPointer;
+			}
+			if (DsaPointerIsValid(statent->info.plan_advice))
+			{
+				dsa_free(pgStatCustomLocal.dsa, statent->info.plan_advice);
+				statent->info.plan_advice = InvalidDsaPointer;
 			}
 			LWLockRelease(&header->lock);
 
@@ -495,14 +524,19 @@ pgsp_dealloc_release(void)
 		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
 		/*
-		 * Free the plan text, if any was still stored, from the DSA. We don't
-		 * need a header lock here since we hold the partition lock exclusively
-		 * and with refcount = 1 no backend holds a direct reference.
+		 * Free the plan text (and any advice string), if still stored, from the
+		 * DSA. We don't need a header lock here since we hold the partition lock
+		 * exclusively and with refcount = 1 no backend holds a direct reference.
 		 */
 		if (DsaPointerIsValid(statent->info.plan_text))
 		{
 			dsa_free(pgsp_plan_dsa, statent->info.plan_text);
 			statent->info.plan_text = InvalidDsaPointer;
+		}
+		if (DsaPointerIsValid(statent->info.plan_advice))
+		{
+			dsa_free(pgStatCustomLocal.dsa, statent->info.plan_advice);
+			statent->info.plan_advice = InvalidDsaPointer;
 		}
 
 		/* Drop our extra reference (1 -> 0) and free the entry. */
@@ -734,6 +768,167 @@ pgsp_decompress_plan_text(char *stored_plan, size_t stored_plan_size, int stored
 	pg_unreachable();
 }
 
+#if PG_VERSION_NUM >= 190000
+
+/*
+ * Signature of pg_plan_advice_request_advice_generation(), resolved at runtime
+ * so that we don't have a hard link-time dependency on pg_plan_advice.
+ */
+typedef void (*pgsp_request_advice_generation_fn) (bool activate);
+
+static pgsp_request_advice_generation_fn pgsp_advice_fn = NULL;
+static bool pgsp_advice_fn_resolved = false;
+
+/*
+ * Resolve pg_plan_advice_request_advice_generation() if pg_plan_advice is
+ * loaded. We only attempt the lookup when pg_plan_advice is listed in
+ * shared_preload_libraries, since load_external_function() would otherwise
+ * raise an error when the library is not present. Returns NULL when advice
+ * generation cannot be triggered.
+ */
+static pgsp_request_advice_generation_fn
+pgsp_get_advice_fn(void)
+{
+	if (!pgsp_advice_fn_resolved)
+	{
+		const char *preload;
+
+		pgsp_advice_fn_resolved = true;
+
+		preload = GetConfigOption("shared_preload_libraries", true, false);
+		if (preload != NULL && strstr(preload, "pg_plan_advice") != NULL)
+			pgsp_advice_fn = (pgsp_request_advice_generation_fn)
+				load_external_function("$libdir/pg_plan_advice",
+									   "pg_plan_advice_request_advice_generation",
+									   false, NULL);
+	}
+
+	return pgsp_advice_fn;
+}
+
+/*
+ * Extract the generated pg_plan_advice string from a planned statement, if
+ * pg_plan_advice stashed one in PlannedStmt.extension_state. Returns NULL when
+ * no advice is present.
+ */
+static char *
+pgsp_get_plan_advice(PlannedStmt *pstmt)
+{
+	ListCell   *lc;
+	List	   *pgpa_list = NIL;
+
+	foreach(lc, pstmt->extension_state)
+	{
+		DefElem    *item = (DefElem *) lfirst(lc);
+
+		if (strcmp(item->defname, "pg_plan_advice") == 0)
+		{
+			pgpa_list = (List *) item->arg;
+			break;
+		}
+	}
+
+	foreach(lc, pgpa_list)
+	{
+		DefElem    *item = (DefElem *) lfirst(lc);
+
+		if (strcmp(item->defname, "advice_string") == 0)
+			return strVal(item->arg);
+	}
+
+	return NULL;
+}
+
+/*
+ * Shared set of query ids that are still missing a plan advice string, used by
+ * the "delayed" advice mode. Membership is the flag: an entry exists if and
+ * only if we want pg_plan_advice to generate advice the next time the query is
+ * planned (on any connection). Backed by a named dshash in the DSM registry,
+ * so no extra shared memory plumbing is required.
+ */
+typedef struct PgspAdviceWantedKey
+{
+	Oid			dboid;
+	uint64		queryid;
+}			PgspAdviceWantedKey;
+
+static const dshash_parameters advice_wanted_params = {
+	sizeof(PgspAdviceWantedKey),
+	sizeof(PgspAdviceWantedKey),
+	dshash_memcmp,
+	dshash_memhash,
+	dshash_memcpy,
+	0							/* tranche_id is ignored by GetNamedDSHash() */
+};
+
+static dshash_table *advice_wanted_hash = NULL;
+
+static dshash_table *
+pgsp_advice_wanted_attach(void)
+{
+	if (advice_wanted_hash == NULL)
+	{
+		bool		found;
+
+		advice_wanted_hash = GetNamedDSHash("pg_stat_plans_advice_wanted",
+											&advice_wanted_params, &found);
+	}
+
+	return advice_wanted_hash;
+}
+
+static void
+pgsp_advice_wanted_init_key(PgspAdviceWantedKey *key, uint64 queryId)
+{
+	/* zero out padding so memcmp/memhash are deterministic */
+	memset(key, 0, sizeof(*key));
+	key->dboid = MyDatabaseId;
+	key->queryid = queryId;
+}
+
+static bool
+pgsp_advice_wanted(uint64 queryId)
+{
+	dshash_table *h = pgsp_advice_wanted_attach();
+	PgspAdviceWantedKey key;
+	void	   *entry;
+
+	pgsp_advice_wanted_init_key(&key, queryId);
+	entry = dshash_find(h, &key, false);
+	if (entry != NULL)
+	{
+		dshash_release_lock(h, entry);
+		return true;
+	}
+
+	return false;
+}
+
+static void
+pgsp_advice_wanted_add(uint64 queryId)
+{
+	dshash_table *h = pgsp_advice_wanted_attach();
+	PgspAdviceWantedKey key;
+	bool		found;
+	void	   *entry;
+
+	pgsp_advice_wanted_init_key(&key, queryId);
+	entry = dshash_find_or_insert(h, &key, &found);
+	dshash_release_lock(h, entry);
+}
+
+static void
+pgsp_advice_wanted_remove(uint64 queryId)
+{
+	dshash_table *h = pgsp_advice_wanted_attach();
+	PgspAdviceWantedKey key;
+
+	pgsp_advice_wanted_init_key(&key, queryId);
+	(void) dshash_delete_key(h, &key);
+}
+
+#endif							/* PG_VERSION_NUM >= 190000 */
+
 static void
 pgstat_report_plan_stats(QueryDesc *queryDesc,
 						 PgStat_Counter exec_count,
@@ -810,6 +1005,8 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 			shstatent->stats.info.plan_text_compression = 0;
 		}
 		shstatent->stats.info.plan_encoding = GetDatabaseEncoding();
+		shstatent->stats.info.plan_advice = InvalidDsaPointer;
+		shstatent->stats.info.plan_advice_size = 0;
 
 		/*
 		 * Take an extra reference so pgstat can't free the entry (and orphan
@@ -834,6 +1031,52 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 		pfree(plan);
 	}
+
+#if PG_VERSION_NUM >= 190000
+	/*
+	 * Record the pg_plan_advice string for this plan, if we don't have it yet.
+	 * The advice is generated during planning (when we requested it via
+	 * pgsp_planner) and stashed in PlannedStmt.extension_state.
+	 *
+	 * In "delayed" mode the first occurrence of a query id is not planned with
+	 * advice generation enabled, so no advice is available yet; we flag the
+	 * query id as wanting advice so the next planning (on this or any other
+	 * connection) generates it, and we record it then.
+	 */
+	if (pgsp_plan_advice != PGSP_ADVICE_OFF &&
+		!DsaPointerIsValid(shstatent->stats.info.plan_advice))
+	{
+		char	   *advice = pgsp_get_plan_advice(queryDesc->plannedstmt);
+
+		if (advice != NULL && advice[0] != '\0')
+		{
+			size_t		advice_size = strlen(advice) + 1;
+
+			(void) pgstat_custom_lock_entry(entry_ref, false);
+
+			/* re-check under lock, another backend may have stored it */
+			if (!DsaPointerIsValid(shstatent->stats.info.plan_advice))
+			{
+				dsa_pointer advice_dp = dsa_allocate(pgStatCustomLocal.dsa, advice_size);
+
+				memcpy(dsa_get_address(pgStatCustomLocal.dsa, advice_dp), advice, advice_size);
+				shstatent->stats.info.plan_advice = advice_dp;
+				shstatent->stats.info.plan_advice_size = advice_size;
+			}
+
+			pgstat_custom_unlock_entry(entry_ref);
+
+			/* We have advice for this query id now, stop requesting it */
+			if (pgsp_plan_advice == PGSP_ADVICE_DELAYED)
+				pgsp_advice_wanted_remove(queryId);
+		}
+		else if (pgsp_plan_advice == PGSP_ADVICE_DELAYED)
+		{
+			/* No advice yet; request generation on the next planning */
+			pgsp_advice_wanted_add(queryId);
+		}
+	}
+#endif
 
 	pending->exec_count += exec_count;
 	pending->exec_time += exec_time;
@@ -962,6 +1205,34 @@ pgsp_planner(Query *parse,
 #endif
 {
 	PlannedStmt *result;
+#if PG_VERSION_NUM >= 190000
+	bool		advise = false;
+	pgsp_request_advice_generation_fn advice_fn = NULL;
+
+	/*
+	 * Decide whether to ask pg_plan_advice to generate a plan advice string
+	 * for this query. We only do this for queries we would actually track, and
+	 * in "delayed" mode only for query ids that are still missing advice (as
+	 * recorded in the shared advice-wanted set, so a second execution on any
+	 * connection can capture it). The advice ends up in
+	 * PlannedStmt.extension_state and is recorded in pgstat_report_plan_stats.
+	 *
+	 * Note: nesting_level has not been incremented yet, so pgsp_enabled()
+	 * reflects this query, matching the check done after planning below.
+	 */
+	if (pgsp_plan_advice != PGSP_ADVICE_OFF &&
+		parse->queryId != UINT64CONST(0) &&
+		pgsp_enabled(nesting_level))
+	{
+		advice_fn = pgsp_get_advice_fn();
+		if (advice_fn != NULL)
+			advise = (pgsp_plan_advice == PGSP_ADVICE_ALWAYS) ||
+				pgsp_advice_wanted(parse->queryId);
+	}
+
+	if (advise)
+		advice_fn(true);
+#endif
 
 	/*
 	 * Increment the nesting level, to ensure that functions evaluated during
@@ -989,6 +1260,10 @@ pgsp_planner(Query *parse,
 	PG_FINALLY();
 	{
 		nesting_level--;
+#if PG_VERSION_NUM >= 190000
+		if (advise)
+			advice_fn(false);
+#endif
 	}
 	PG_END_TRY();
 
@@ -1538,6 +1813,19 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomEnumVariable("pg_stat_plans.plan_advice",
+							 "Controls collection of pg_plan_advice strings for tracked plans.",
+							 "Only effective on Postgres 19 or newer with pg_plan_advice loaded. "
+							 "\"delayed\" records advice on the second execution of a query id.",
+							 &pgsp_plan_advice,
+							 PGSP_ADVICE_OFF,
+							 advice_options,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	MarkGUCPrefixReserved("pg_stat_plans");
 
 	/*
@@ -1596,13 +1884,28 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 	/* Free plan text memory and allow cleanup of dropped entries */
 	pgsp_dealloc_release();
 
+#if PG_VERSION_NUM >= 190000
+	/* Also clear the shared set of query ids still missing plan advice */
+	if (pgsp_plan_advice == PGSP_ADVICE_DELAYED || advice_wanted_hash != NULL)
+	{
+		dshash_table *h = pgsp_advice_wanted_attach();
+		dshash_seq_status s;
+		void	   *entry;
+
+		dshash_seq_init(&s, h, true);
+		while ((entry = dshash_seq_next(&s)) != NULL)
+			dshash_delete_current(&s);
+		dshash_seq_term(&s);
+	}
+#endif
+
 	PG_RETURN_VOID();
 }
 
 Datum
 pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_PLANS_COLS 8
+#define PG_STAT_PLANS_COLS 9
 	bool		showplan = PG_GETARG_BOOL(0);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Oid			userid = GetUserId();
@@ -1692,6 +1995,24 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		{
 			nulls[i++] = true;
 		}
+
+		/* plan_advice (Postgres 19+; always NULL otherwise) */
+#if PG_VERSION_NUM >= 190000
+		if (showplan && (is_allowed_role || statent->info.userid == userid) &&
+			DsaPointerIsValid(statent->info.plan_advice))
+		{
+			char	   *astr = dsa_get_address(pgStatCustomLocal.dsa, statent->info.plan_advice);
+
+			values[i++] = CStringGetTextDatum(astr);
+		}
+		else
+		{
+			nulls[i++] = true;
+		}
+#else
+		nulls[i++] = true;
+#endif
+
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
 	dshash_seq_term(&hstat);
