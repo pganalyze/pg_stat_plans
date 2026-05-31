@@ -42,7 +42,7 @@
 static void
 _jumbleAlias(JumbleState *jstate, Node *node)
 {
-	Alias	   *expr = (Alias *) node;
+	Alias *expr = (Alias *) node;
 
 	JUMBLE_STRING(aliasname);
 	JUMBLE_NODE(colnames);
@@ -51,7 +51,7 @@ _jumbleAlias(JumbleState *jstate, Node *node)
 static void
 _jumbleRangeVar(JumbleState *jstate, Node *node)
 {
-	RangeVar   *expr = (RangeVar *) node;
+	RangeVar *expr = (RangeVar *) node;
 
 	JUMBLE_STRING(catalogname);
 	JUMBLE_STRING(schemaname);
@@ -64,7 +64,7 @@ _jumbleRangeVar(JumbleState *jstate, Node *node)
 static void
 _jumbleTableFunc(JumbleState *jstate, Node *node)
 {
-	TableFunc  *expr = (TableFunc *) node;
+	TableFunc *expr = (TableFunc *) node;
 
 	JUMBLE_FIELD(functype);
 	JUMBLE_NODE(docexpr);
@@ -89,7 +89,7 @@ _jumbleIntoClause(JumbleState *jstate, Node *node)
 static void
 _jumbleVar(JumbleState *jstate, Node *node)
 {
-	Var		   *expr = (Var *) node;
+	Var *expr = (Var *) node;
 
 	JUMBLE_FIELD(varno);
 	JUMBLE_FIELD(varattno);
@@ -100,26 +100,16 @@ _jumbleVar(JumbleState *jstate, Node *node)
 static void
 _jumbleConst(JumbleState *jstate, Node *node)
 {
-	Const	   *expr = (Const *) node;
+	Const *expr = (Const *) node;
 
 	JUMBLE_FIELD(consttype);
 	JUMBLE_LOCATION(location);
 }
 
 static void
-_jumbleParam(JumbleState *jstate, Node *node)
-{
-	Param	   *expr = (Param *) node;
-
-	JUMBLE_FIELD(paramkind);
-	JUMBLE_FIELD(paramid);
-	JUMBLE_FIELD(paramtype);
-}
-
-static void
 _jumbleAggref(JumbleState *jstate, Node *node)
 {
-	Aggref	   *expr = (Aggref *) node;
+	Aggref *expr = (Aggref *) node;
 
 	JUMBLE_FIELD(aggfnoid);
 	JUMBLE_NODE(aggdirectargs);
@@ -182,7 +172,7 @@ _jumbleSubscriptingRef(JumbleState *jstate, Node *node)
 static void
 _jumbleFuncExpr(JumbleState *jstate, Node *node)
 {
-	FuncExpr   *expr = (FuncExpr *) node;
+	FuncExpr *expr = (FuncExpr *) node;
 
 	JUMBLE_FIELD(funcid);
 	JUMBLE_NODE(args);
@@ -200,7 +190,7 @@ _jumbleNamedArgExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleOpExpr(JumbleState *jstate, Node *node)
 {
-	OpExpr	   *expr = (OpExpr *) node;
+	OpExpr *expr = (OpExpr *) node;
 
 	JUMBLE_FIELD(opno);
 	JUMBLE_NODE(args);
@@ -237,7 +227,7 @@ _jumbleScalarArrayOpExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleBoolExpr(JumbleState *jstate, Node *node)
 {
-	BoolExpr   *expr = (BoolExpr *) node;
+	BoolExpr *expr = (BoolExpr *) node;
 
 	JUMBLE_FIELD(boolop);
 	JUMBLE_NODE(args);
@@ -246,7 +236,7 @@ _jumbleBoolExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleSubLink(JumbleState *jstate, Node *node)
 {
-	SubLink    *expr = (SubLink *) node;
+	SubLink *expr = (SubLink *) node;
 
 	JUMBLE_FIELD(subLinkType);
 	JUMBLE_FIELD(subLinkId);
@@ -257,7 +247,7 @@ _jumbleSubLink(JumbleState *jstate, Node *node)
 static void
 _jumbleSubPlan(JumbleState *jstate, Node *node)
 {
-	SubPlan    *expr = (SubPlan *) node;
+	SubPlan *expr = (SubPlan *) node;
 
 	JUMBLE_FIELD(subLinkType);
 	JUMBLE_NODE(testexpr);
@@ -342,7 +332,7 @@ _jumbleCollateExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleCaseExpr(JumbleState *jstate, Node *node)
 {
-	CaseExpr   *expr = (CaseExpr *) node;
+	CaseExpr *expr = (CaseExpr *) node;
 
 	JUMBLE_NODE(arg);
 	JUMBLE_NODE(args);
@@ -352,7 +342,7 @@ _jumbleCaseExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleCaseWhen(JumbleState *jstate, Node *node)
 {
-	CaseWhen   *expr = (CaseWhen *) node;
+	CaseWhen *expr = (CaseWhen *) node;
 
 	JUMBLE_NODE(expr);
 	JUMBLE_NODE(result);
@@ -369,15 +359,15 @@ _jumbleCaseTestExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleArrayExpr(JumbleState *jstate, Node *node)
 {
-	ArrayExpr  *expr = (ArrayExpr *) node;
+	ArrayExpr *expr = (ArrayExpr *) node;
 
-	JUMBLE_ELEMENTS(elements);
+	JUMBLE_ELEMENTS(elements, node);
 }
 
 static void
 _jumbleRowExpr(JumbleState *jstate, Node *node)
 {
-	RowExpr    *expr = (RowExpr *) node;
+	RowExpr *expr = (RowExpr *) node;
 
 	JUMBLE_NODE(args);
 }
@@ -421,7 +411,7 @@ _jumbleSQLValueFunction(JumbleState *jstate, Node *node)
 static void
 _jumbleXmlExpr(JumbleState *jstate, Node *node)
 {
-	XmlExpr    *expr = (XmlExpr *) node;
+	XmlExpr *expr = (XmlExpr *) node;
 
 	JUMBLE_FIELD(op);
 	JUMBLE_NODE(named_args);
@@ -496,7 +486,7 @@ _jumbleJsonBehavior(JumbleState *jstate, Node *node)
 static void
 _jumbleJsonExpr(JumbleState *jstate, Node *node)
 {
-	JsonExpr   *expr = (JsonExpr *) node;
+	JsonExpr *expr = (JsonExpr *) node;
 
 	JUMBLE_FIELD(op);
 	JUMBLE_STRING(column_name);
@@ -548,7 +538,7 @@ _jumbleJsonTableSiblingJoin(JumbleState *jstate, Node *node)
 static void
 _jumbleNullTest(JumbleState *jstate, Node *node)
 {
-	NullTest   *expr = (NullTest *) node;
+	NullTest *expr = (NullTest *) node;
 
 	JUMBLE_NODE(arg);
 	JUMBLE_FIELD(nulltesttype);
@@ -659,7 +649,7 @@ _jumbleRangeTblRef(JumbleState *jstate, Node *node)
 static void
 _jumbleJoinExpr(JumbleState *jstate, Node *node)
 {
-	JoinExpr   *expr = (JoinExpr *) node;
+	JoinExpr *expr = (JoinExpr *) node;
 
 	JUMBLE_FIELD(jointype);
 	JUMBLE_FIELD(isNatural);
@@ -672,7 +662,7 @@ _jumbleJoinExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleFromExpr(JumbleState *jstate, Node *node)
 {
-	FromExpr   *expr = (FromExpr *) node;
+	FromExpr *expr = (FromExpr *) node;
 
 	JUMBLE_NODE(fromlist);
 	JUMBLE_NODE(quals);
@@ -696,7 +686,7 @@ _jumbleOnConflictExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleQuery(JumbleState *jstate, Node *node)
 {
-	Query	   *expr = (Query *) node;
+	Query *expr = (Query *) node;
 
 	JUMBLE_FIELD(commandType);
 	JUMBLE_NODE(utilityStmt);
@@ -725,7 +715,7 @@ _jumbleQuery(JumbleState *jstate, Node *node)
 static void
 _jumbleTypeName(JumbleState *jstate, Node *node)
 {
-	TypeName   *expr = (TypeName *) node;
+	TypeName *expr = (TypeName *) node;
 
 	JUMBLE_NODE(names);
 	JUMBLE_FIELD(typeOid);
@@ -739,7 +729,7 @@ _jumbleTypeName(JumbleState *jstate, Node *node)
 static void
 _jumbleColumnRef(JumbleState *jstate, Node *node)
 {
-	ColumnRef  *expr = (ColumnRef *) node;
+	ColumnRef *expr = (ColumnRef *) node;
 
 	JUMBLE_NODE(fields);
 }
@@ -747,7 +737,7 @@ _jumbleColumnRef(JumbleState *jstate, Node *node)
 static void
 _jumbleParamRef(JumbleState *jstate, Node *node)
 {
-	ParamRef   *expr = (ParamRef *) node;
+	ParamRef *expr = (ParamRef *) node;
 
 	JUMBLE_FIELD(number);
 }
@@ -755,7 +745,7 @@ _jumbleParamRef(JumbleState *jstate, Node *node)
 static void
 _jumbleA_Expr(JumbleState *jstate, Node *node)
 {
-	A_Expr	   *expr = (A_Expr *) node;
+	A_Expr *expr = (A_Expr *) node;
 
 	JUMBLE_FIELD(kind);
 	JUMBLE_NODE(name);
@@ -766,7 +756,7 @@ _jumbleA_Expr(JumbleState *jstate, Node *node)
 static void
 _jumbleTypeCast(JumbleState *jstate, Node *node)
 {
-	TypeCast   *expr = (TypeCast *) node;
+	TypeCast *expr = (TypeCast *) node;
 
 	JUMBLE_NODE(arg);
 	JUMBLE_NODE(typeName);
@@ -784,7 +774,7 @@ _jumbleCollateClause(JumbleState *jstate, Node *node)
 static void
 _jumbleRoleSpec(JumbleState *jstate, Node *node)
 {
-	RoleSpec   *expr = (RoleSpec *) node;
+	RoleSpec *expr = (RoleSpec *) node;
 
 	JUMBLE_FIELD(roletype);
 	JUMBLE_STRING(rolename);
@@ -793,7 +783,7 @@ _jumbleRoleSpec(JumbleState *jstate, Node *node)
 static void
 _jumbleFuncCall(JumbleState *jstate, Node *node)
 {
-	FuncCall   *expr = (FuncCall *) node;
+	FuncCall *expr = (FuncCall *) node;
 
 	JUMBLE_NODE(funcname);
 	JUMBLE_NODE(args);
@@ -810,7 +800,7 @@ _jumbleFuncCall(JumbleState *jstate, Node *node)
 static void
 _jumbleA_Star(JumbleState *jstate, Node *node)
 {
-	A_Star	   *expr = (A_Star *) node;
+	A_Star *expr = (A_Star *) node;
 
 	(void) expr;
 }
@@ -818,7 +808,7 @@ _jumbleA_Star(JumbleState *jstate, Node *node)
 static void
 _jumbleA_Indices(JumbleState *jstate, Node *node)
 {
-	A_Indices  *expr = (A_Indices *) node;
+	A_Indices *expr = (A_Indices *) node;
 
 	JUMBLE_FIELD(is_slice);
 	JUMBLE_NODE(lidx);
@@ -845,7 +835,7 @@ _jumbleA_ArrayExpr(JumbleState *jstate, Node *node)
 static void
 _jumbleResTarget(JumbleState *jstate, Node *node)
 {
-	ResTarget  *expr = (ResTarget *) node;
+	ResTarget *expr = (ResTarget *) node;
 
 	JUMBLE_STRING(name);
 	JUMBLE_NODE(indirection);
@@ -865,7 +855,7 @@ _jumbleMultiAssignRef(JumbleState *jstate, Node *node)
 static void
 _jumbleSortBy(JumbleState *jstate, Node *node)
 {
-	SortBy	   *expr = (SortBy *) node;
+	SortBy *expr = (SortBy *) node;
 
 	JUMBLE_NODE(node);
 	JUMBLE_FIELD(sortby_dir);
@@ -876,7 +866,7 @@ _jumbleSortBy(JumbleState *jstate, Node *node)
 static void
 _jumbleWindowDef(JumbleState *jstate, Node *node)
 {
-	WindowDef  *expr = (WindowDef *) node;
+	WindowDef *expr = (WindowDef *) node;
 
 	JUMBLE_STRING(name);
 	JUMBLE_STRING(refname);
@@ -950,7 +940,7 @@ _jumbleRangeTableSample(JumbleState *jstate, Node *node)
 static void
 _jumbleColumnDef(JumbleState *jstate, Node *node)
 {
-	ColumnDef  *expr = (ColumnDef *) node;
+	ColumnDef *expr = (ColumnDef *) node;
 
 	JUMBLE_STRING(colname);
 	JUMBLE_NODE(typeName);
@@ -985,7 +975,7 @@ _jumbleTableLikeClause(JumbleState *jstate, Node *node)
 static void
 _jumbleIndexElem(JumbleState *jstate, Node *node)
 {
-	IndexElem  *expr = (IndexElem *) node;
+	IndexElem *expr = (IndexElem *) node;
 
 	JUMBLE_STRING(name);
 	JUMBLE_NODE(expr);
@@ -1000,7 +990,7 @@ _jumbleIndexElem(JumbleState *jstate, Node *node)
 static void
 _jumbleDefElem(JumbleState *jstate, Node *node)
 {
-	DefElem    *expr = (DefElem *) node;
+	DefElem *expr = (DefElem *) node;
 
 	JUMBLE_STRING(defnamespace);
 	JUMBLE_STRING(defname);
@@ -1088,7 +1078,6 @@ _jumbleRangeTblEntry(JumbleState *jstate, Node *node)
 	RangeTblEntry *expr = (RangeTblEntry *) node;
 
 	JUMBLE_CUSTOM(RangeTblEntry, eref);
-	JUMBLE_NODE(eref);
 	JUMBLE_FIELD(rtekind);
 	JUMBLE_FIELD(inh);
 	JUMBLE_NODE(tablesample);
@@ -1101,6 +1090,7 @@ _jumbleRangeTblEntry(JumbleState *jstate, Node *node)
 	JUMBLE_STRING(ctename);
 	JUMBLE_FIELD(ctelevelsup);
 	JUMBLE_STRING(enrname);
+	JUMBLE_NODE(groupexprs);
 }
 
 static void
@@ -1345,7 +1335,7 @@ _jumbleJsonTablePathSpec(JumbleState *jstate, Node *node)
 static void
 _jumbleJsonTable(JumbleState *jstate, Node *node)
 {
-	JsonTable  *expr = (JsonTable *) node;
+	JsonTable *expr = (JsonTable *) node;
 
 	JUMBLE_NODE(context_item);
 	JUMBLE_NODE(pathspec);
@@ -1516,7 +1506,7 @@ _jumbleUpdateStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleMergeStmt(JumbleState *jstate, Node *node)
 {
-	MergeStmt  *expr = (MergeStmt *) node;
+	MergeStmt *expr = (MergeStmt *) node;
 
 	JUMBLE_NODE(relation);
 	JUMBLE_NODE(sourceRelation);
@@ -1668,7 +1658,7 @@ _jumbleAlterDomainStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleGrantStmt(JumbleState *jstate, Node *node)
 {
-	GrantStmt  *expr = (GrantStmt *) node;
+	GrantStmt *expr = (GrantStmt *) node;
 
 	JUMBLE_FIELD(is_grant);
 	JUMBLE_FIELD(targtype);
@@ -1726,7 +1716,7 @@ _jumbleAlterDefaultPrivilegesStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleCopyStmt(JumbleState *jstate, Node *node)
 {
-	CopyStmt   *expr = (CopyStmt *) node;
+	CopyStmt *expr = (CopyStmt *) node;
 
 	JUMBLE_NODE(relation);
 	JUMBLE_NODE(query);
@@ -2216,7 +2206,7 @@ _jumbleAlterOpFamilyStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleDropStmt(JumbleState *jstate, Node *node)
 {
-	DropStmt   *expr = (DropStmt *) node;
+	DropStmt *expr = (DropStmt *) node;
 
 	JUMBLE_NODE(objects);
 	JUMBLE_FIELD(removeType);
@@ -2277,7 +2267,7 @@ _jumbleClosePortalStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleFetchStmt(JumbleState *jstate, Node *node)
 {
-	FetchStmt  *expr = (FetchStmt *) node;
+	FetchStmt *expr = (FetchStmt *) node;
 
 	JUMBLE_FIELD(direction);
 	JUMBLE_FIELD(howMany);
@@ -2288,7 +2278,7 @@ _jumbleFetchStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleIndexStmt(JumbleState *jstate, Node *node)
 {
-	IndexStmt  *expr = (IndexStmt *) node;
+	IndexStmt *expr = (IndexStmt *) node;
 
 	JUMBLE_STRING(idxname);
 	JUMBLE_NODE(relation);
@@ -2334,7 +2324,7 @@ _jumbleCreateStatsStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleStatsElem(JumbleState *jstate, Node *node)
 {
-	StatsElem  *expr = (StatsElem *) node;
+	StatsElem *expr = (StatsElem *) node;
 
 	JUMBLE_STRING(name);
 	JUMBLE_NODE(expr);
@@ -2388,7 +2378,7 @@ _jumbleAlterFunctionStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleDoStmt(JumbleState *jstate, Node *node)
 {
-	DoStmt	   *expr = (DoStmt *) node;
+	DoStmt *expr = (DoStmt *) node;
 
 	JUMBLE_NODE(args);
 }
@@ -2396,7 +2386,7 @@ _jumbleDoStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleCallStmt(JumbleState *jstate, Node *node)
 {
-	CallStmt   *expr = (CallStmt *) node;
+	CallStmt *expr = (CallStmt *) node;
 
 	JUMBLE_NODE(funcexpr);
 	JUMBLE_NODE(outargs);
@@ -2473,7 +2463,7 @@ _jumbleAlterTypeStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleRuleStmt(JumbleState *jstate, Node *node)
 {
-	RuleStmt   *expr = (RuleStmt *) node;
+	RuleStmt *expr = (RuleStmt *) node;
 
 	JUMBLE_NODE(relation);
 	JUMBLE_STRING(rulename);
@@ -2563,7 +2553,7 @@ _jumbleAlterEnumStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleViewStmt(JumbleState *jstate, Node *node)
 {
-	ViewStmt   *expr = (ViewStmt *) node;
+	ViewStmt *expr = (ViewStmt *) node;
 
 	JUMBLE_NODE(view);
 	JUMBLE_NODE(aliases);
@@ -2576,7 +2566,7 @@ _jumbleViewStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleLoadStmt(JumbleState *jstate, Node *node)
 {
-	LoadStmt   *expr = (LoadStmt *) node;
+	LoadStmt *expr = (LoadStmt *) node;
 
 	JUMBLE_STRING(filename);
 }
@@ -2714,7 +2704,7 @@ _jumbleDiscardStmt(JumbleState *jstate, Node *node)
 static void
 _jumbleLockStmt(JumbleState *jstate, Node *node)
 {
-	LockStmt   *expr = (LockStmt *) node;
+	LockStmt *expr = (LockStmt *) node;
 
 	JUMBLE_NODE(relations);
 	JUMBLE_FIELD(mode);
@@ -2934,7 +2924,7 @@ _jumbleGroupByOrdering(JumbleState *jstate, Node *node)
 static void
 _jumbleResult(JumbleState *jstate, Node *node)
 {
-	Result	   *expr = (Result *) node;
+	Result *expr = (Result *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -2983,8 +2973,6 @@ _jumbleModifyTable(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(resultRelations);
 	JUMBLE_NODE(updateColnosLists);
 	JUMBLE_NODE(withCheckOptionLists);
-	JUMBLE_STRING(returningOldAlias);
-	JUMBLE_STRING(returningNewAlias);
 	JUMBLE_NODE(returningLists);
 	JUMBLE_BITMAPSET(fdwDirectModifyPlans);
 	JUMBLE_NODE(rowMarks);
@@ -3003,7 +2991,7 @@ _jumbleModifyTable(JumbleState *jstate, Node *node)
 static void
 _jumbleAppend(JumbleState *jstate, Node *node)
 {
-	Append	   *expr = (Append *) node;
+	Append *expr = (Append *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3064,7 +3052,7 @@ _jumbleRecursiveUnion(JumbleState *jstate, Node *node)
 static void
 _jumbleBitmapAnd(JumbleState *jstate, Node *node)
 {
-	BitmapAnd  *expr = (BitmapAnd *) node;
+	BitmapAnd *expr = (BitmapAnd *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3079,7 +3067,7 @@ _jumbleBitmapAnd(JumbleState *jstate, Node *node)
 static void
 _jumbleBitmapOr(JumbleState *jstate, Node *node)
 {
-	BitmapOr   *expr = (BitmapOr *) node;
+	BitmapOr *expr = (BitmapOr *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3095,7 +3083,7 @@ _jumbleBitmapOr(JumbleState *jstate, Node *node)
 static void
 _jumbleSeqScan(JumbleState *jstate, Node *node)
 {
-	SeqScan    *expr = (SeqScan *) node;
+	SeqScan *expr = (SeqScan *) node;
 
 	JUMBLE_FIELD(scan.plan.parallel_aware);
 	JUMBLE_FIELD(scan.plan.parallel_safe);
@@ -3128,7 +3116,7 @@ _jumbleSampleScan(JumbleState *jstate, Node *node)
 static void
 _jumbleIndexScan(JumbleState *jstate, Node *node)
 {
-	IndexScan  *expr = (IndexScan *) node;
+	IndexScan *expr = (IndexScan *) node;
 
 	JUMBLE_FIELD(scan.plan.parallel_aware);
 	JUMBLE_FIELD(scan.plan.parallel_safe);
@@ -3210,7 +3198,7 @@ _jumbleBitmapHeapScan(JumbleState *jstate, Node *node)
 static void
 _jumbleTidScan(JumbleState *jstate, Node *node)
 {
-	TidScan    *expr = (TidScan *) node;
+	TidScan *expr = (TidScan *) node;
 
 	JUMBLE_FIELD(scan.plan.parallel_aware);
 	JUMBLE_FIELD(scan.plan.parallel_safe);
@@ -3313,7 +3301,7 @@ _jumbleTableFuncScan(JumbleState *jstate, Node *node)
 static void
 _jumbleCteScan(JumbleState *jstate, Node *node)
 {
-	CteScan    *expr = (CteScan *) node;
+	CteScan *expr = (CteScan *) node;
 
 	JUMBLE_FIELD(scan.plan.parallel_aware);
 	JUMBLE_FIELD(scan.plan.parallel_safe);
@@ -3412,7 +3400,7 @@ _jumbleCustomScan(JumbleState *jstate, Node *node)
 static void
 _jumbleNestLoop(JumbleState *jstate, Node *node)
 {
-	NestLoop   *expr = (NestLoop *) node;
+	NestLoop *expr = (NestLoop *) node;
 
 	JUMBLE_FIELD(join.plan.parallel_aware);
 	JUMBLE_FIELD(join.plan.parallel_safe);
@@ -3440,7 +3428,7 @@ _jumbleNestLoopParam(JumbleState *jstate, Node *node)
 static void
 _jumbleMergeJoin(JumbleState *jstate, Node *node)
 {
-	MergeJoin  *expr = (MergeJoin *) node;
+	MergeJoin *expr = (MergeJoin *) node;
 
 	JUMBLE_FIELD(join.plan.parallel_aware);
 	JUMBLE_FIELD(join.plan.parallel_safe);
@@ -3464,7 +3452,7 @@ _jumbleMergeJoin(JumbleState *jstate, Node *node)
 static void
 _jumbleHashJoin(JumbleState *jstate, Node *node)
 {
-	HashJoin   *expr = (HashJoin *) node;
+	HashJoin *expr = (HashJoin *) node;
 
 	JUMBLE_FIELD(join.plan.parallel_aware);
 	JUMBLE_FIELD(join.plan.parallel_safe);
@@ -3486,7 +3474,7 @@ _jumbleHashJoin(JumbleState *jstate, Node *node)
 static void
 _jumbleMaterial(JumbleState *jstate, Node *node)
 {
-	Material   *expr = (Material *) node;
+	Material *expr = (Material *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3501,7 +3489,7 @@ _jumbleMaterial(JumbleState *jstate, Node *node)
 static void
 _jumbleMemoize(JumbleState *jstate, Node *node)
 {
-	Memoize    *expr = (Memoize *) node;
+	Memoize *expr = (Memoize *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3523,7 +3511,7 @@ _jumbleMemoize(JumbleState *jstate, Node *node)
 static void
 _jumbleSort(JumbleState *jstate, Node *node)
 {
-	Sort	   *expr = (Sort *) node;
+	Sort *expr = (Sort *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3564,7 +3552,7 @@ _jumbleIncrementalSort(JumbleState *jstate, Node *node)
 static void
 _jumbleGroup(JumbleState *jstate, Node *node)
 {
-	Group	   *expr = (Group *) node;
+	Group *expr = (Group *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3583,7 +3571,7 @@ _jumbleGroup(JumbleState *jstate, Node *node)
 static void
 _jumbleAgg(JumbleState *jstate, Node *node)
 {
-	Agg		   *expr = (Agg *) node;
+	Agg *expr = (Agg *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3608,7 +3596,7 @@ _jumbleAgg(JumbleState *jstate, Node *node)
 static void
 _jumbleWindowAgg(JumbleState *jstate, Node *node)
 {
-	WindowAgg  *expr = (WindowAgg *) node;
+	WindowAgg *expr = (WindowAgg *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3618,7 +3606,6 @@ _jumbleWindowAgg(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(plan.qual);
 	JUMBLE_BITMAPSET(plan.extParam);
 	JUMBLE_BITMAPSET(plan.allParam);
-	JUMBLE_STRING(winname);
 	JUMBLE_FIELD(winref);
 	JUMBLE_FIELD(partNumCols);
 	JUMBLE_ARRAY(partColIdx, expr->partNumCols);
@@ -3644,7 +3631,7 @@ _jumbleWindowAgg(JumbleState *jstate, Node *node)
 static void
 _jumbleUnique(JumbleState *jstate, Node *node)
 {
-	Unique	   *expr = (Unique *) node;
+	Unique *expr = (Unique *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3663,7 +3650,7 @@ _jumbleUnique(JumbleState *jstate, Node *node)
 static void
 _jumbleGather(JumbleState *jstate, Node *node)
 {
-	Gather	   *expr = (Gather *) node;
+	Gather *expr = (Gather *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3706,7 +3693,7 @@ _jumbleGatherMerge(JumbleState *jstate, Node *node)
 static void
 _jumbleHash(JumbleState *jstate, Node *node)
 {
-	Hash	   *expr = (Hash *) node;
+	Hash *expr = (Hash *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3725,7 +3712,7 @@ _jumbleHash(JumbleState *jstate, Node *node)
 static void
 _jumbleSetOp(JumbleState *jstate, Node *node)
 {
-	SetOp	   *expr = (SetOp *) node;
+	SetOp *expr = (SetOp *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3747,7 +3734,7 @@ _jumbleSetOp(JumbleState *jstate, Node *node)
 static void
 _jumbleLockRows(JumbleState *jstate, Node *node)
 {
-	LockRows   *expr = (LockRows *) node;
+	LockRows *expr = (LockRows *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3764,7 +3751,7 @@ _jumbleLockRows(JumbleState *jstate, Node *node)
 static void
 _jumbleLimit(JumbleState *jstate, Node *node)
 {
-	Limit	   *expr = (Limit *) node;
+	Limit *expr = (Limit *) node;
 
 	JUMBLE_FIELD(plan.parallel_aware);
 	JUMBLE_FIELD(plan.parallel_safe);
@@ -3794,7 +3781,7 @@ _jumbleExtensibleNode(JumbleState *jstate, Node *node)
 static void
 _jumbleInteger(JumbleState *jstate, Node *node)
 {
-	Integer    *expr = (Integer *) node;
+	Integer *expr = (Integer *) node;
 
 	JUMBLE_FIELD(ival);
 }
@@ -3802,7 +3789,7 @@ _jumbleInteger(JumbleState *jstate, Node *node)
 static void
 _jumbleFloat(JumbleState *jstate, Node *node)
 {
-	Float	   *expr = (Float *) node;
+	Float *expr = (Float *) node;
 
 	JUMBLE_STRING(fval);
 }
@@ -3810,7 +3797,7 @@ _jumbleFloat(JumbleState *jstate, Node *node)
 static void
 _jumbleBoolean(JumbleState *jstate, Node *node)
 {
-	Boolean    *expr = (Boolean *) node;
+	Boolean *expr = (Boolean *) node;
 
 	JUMBLE_FIELD(boolval);
 }
@@ -3818,7 +3805,7 @@ _jumbleBoolean(JumbleState *jstate, Node *node)
 static void
 _jumbleString(JumbleState *jstate, Node *node)
 {
-	String	   *expr = (String *) node;
+	String *expr = (String *) node;
 
 	JUMBLE_STRING(sval);
 }
@@ -3826,7 +3813,7 @@ _jumbleString(JumbleState *jstate, Node *node)
 static void
 _jumbleBitString(JumbleState *jstate, Node *node)
 {
-	BitString  *expr = (BitString *) node;
+	BitString *expr = (BitString *) node;
 
 	JUMBLE_STRING(bsval);
 }
