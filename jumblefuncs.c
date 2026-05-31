@@ -449,7 +449,9 @@ do { \
 		AppendJumble(jstate, (const unsigned char *) expr->item, sizeof(*(expr->item)) * len); \
 } while(0)
 
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 190000
+#include "pg19_jumblefuncs.funcs.c"
+#elif PG_VERSION_NUM >= 180000
 #include "pg18_jumblefuncs.funcs.c"
 #elif PG_VERSION_NUM >= 170000
 #include "pg17_jumblefuncs.funcs.c"
@@ -536,7 +538,9 @@ JumbleNode(JumbleState *jstate, Node *node)
 
 	switch (nodeTag(expr))
 	{
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 190000
+#include "pg19_jumblefuncs.switch.c"
+#elif PG_VERSION_NUM >= 180000
 #include "pg18_jumblefuncs.switch.c"
 #elif PG_VERSION_NUM >= 170000
 #include "pg17_jumblefuncs.switch.c"

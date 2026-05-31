@@ -1,0 +1,44 @@
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+--
+-- check if we see our own plan in activity
+--
+SELECT plan FROM pg_stat_plans_activity WHERE pid = pg_backend_pid();
+                                                         plan                                                          
+-----------------------------------------------------------------------------------------------------------------------
+ Hash Join                                                                                                            +
+   Hash Cond: ((p.dbid = a.datid) AND (p.userid = a.usesysid) AND (p.queryid = a.query_id) AND (p.planid = a.plan_id))+
+   ->  Function Scan on pg_stat_plans p                                                                               +
+         Filter: (toplevel IS TRUE)                                                                                   +
+   ->  Hash                                                                                                           +
+         ->  Function Scan on pg_stat_plans_get_activity a                                                            +
+               Filter: (pid = pg_backend_pid())
+(1 row)
+
+--
+-- check if we handle showing our plan for named prepared statements correctly
+--
+PREPARE x AS SELECT plan FROM pg_stat_plans_activity WHERE pid = pg_backend_pid();
+EXECUTE x;
+                                                         plan                                                          
+-----------------------------------------------------------------------------------------------------------------------
+ Hash Join                                                                                                            +
+   Hash Cond: ((p.dbid = a.datid) AND (p.userid = a.usesysid) AND (p.queryid = a.query_id) AND (p.planid = a.plan_id))+
+   ->  Function Scan on pg_stat_plans p                                                                               +
+         Filter: (toplevel IS TRUE)                                                                                   +
+   ->  Hash                                                                                                           +
+         ->  Function Scan on pg_stat_plans_get_activity a                                                            +
+               Filter: (pid = pg_backend_pid())
+(1 row)
+
+DEALLOCATE x;
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+

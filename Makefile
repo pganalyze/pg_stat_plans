@@ -29,6 +29,10 @@ ifneq (,$(findstring PostgreSQL 17,$(shell $(PG_CONFIG) --version)))
 	OBJS += compat_16_17/pgstat_custom.o
 endif
 
+ifneq (,$(findstring PostgreSQL 18,$(shell $(PG_CONFIG) --version)))
+	REGRESS_OPTS += --expecteddir=$(PWD)/compat_18
+endif
+
 EXTRA_CLEAN = tmp_check results regression.diffs regression.out
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
