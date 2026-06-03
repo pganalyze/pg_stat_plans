@@ -605,7 +605,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 {
 	PgStat_EntryRef *entry_ref;
 	PgStatShared_Plan *shstatent;
-	PgStat_StatPlanEntry *statent;
+	PgStat_StatPlanEntry *pending;
 	bool		newly_created;
 	uint64		queryId = queryDesc->plannedstmt->queryId;
 	uint64		planId;
@@ -622,7 +622,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 										  PGSTAT_PLAN_IDX(queryId, planId, userid, toplevel), &newly_created);
 
 	shstatent = (PgStatShared_Plan *) entry_ref->shared_stats;
-	statent = &shstatent->stats;
+	pending = (PgStat_StatPlanEntry *) entry_ref->pending;
 
 	if (newly_created)
 	{
@@ -663,9 +663,9 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		pfree(plan);
 	}
 
-	statent->exec_count += exec_count;
-	statent->exec_time += exec_time;
-	statent->usage += USAGE_INCREASE;
+	pending->exec_count += exec_count;
+	pending->exec_time += exec_time;
+	pending->usage += USAGE_INCREASE;
 }
 
 static void

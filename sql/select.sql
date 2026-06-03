@@ -17,6 +17,9 @@ SET enable_indexscan = off;
 SELECT 1 FROM pg_class WHERE relname = 'pg_class';
 SET enable_indexscan = on;
 
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
+
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
 
@@ -34,6 +37,9 @@ SELECT a.attname,
  FROM pg_catalog.pg_attribute a
  WHERE a.attrelid = 'pg_class'::regclass
  ORDER BY attnum LIMIT 1;
+
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
 
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
@@ -62,6 +68,9 @@ select * from lp where a is not null and (a = 'a' or a = 'c');
 select * from lp where a <> 'g';
 select * from lp where a <> 'a' and a <> 'd';
 select * from lp where a not in ('a', 'd');
+
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
 
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
