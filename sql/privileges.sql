@@ -11,10 +11,32 @@ GRANT pg_read_all_stats TO regress_stats_user2;
 
 SET ROLE regress_stats_superuser;
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
-SELECT 1 AS "ONE";
+SELECT 1 AS "SUPER";
 
 SET ROLE regress_stats_user1;
+SELECT 1+1 AS "ONE";
+
+SET ROLE regress_stats_user2;
 SELECT 1+1 AS "TWO";
+
+-- Wait for pending stats to be flushed
+SET ROLE regress_stats_superuser;
+SELECT pg_sleep(1);
+
+--
+-- regress_stats_user1 has no privileges to read the plan text, queryid
+-- or planid of queries executed by others but can see statistics
+-- like calls and rows.
+--
+-- We run this before the other tests so that we don't have a surprising
+-- "<insufficient privilege>" entry from other roles checking pg_stat_plans.
+--
+
+SET ROLE regress_stats_user1;
+SELECT r.rolname, ss.queryid <> 0 AS queryid_bool, ss.planid <> 0 AS planid_bool, ss.plan, ss.calls
+  FROM pg_stat_plans ss JOIN pg_roles r ON ss.userid = r.oid
+  WHERE ss.plan NOT LIKE '%Function Scan on pg_stat_plans%'
+  ORDER BY r.rolname, ss.plan COLLATE "C", ss.calls;
 
 --
 -- A superuser can read all columns of queries executed by others,
@@ -22,19 +44,10 @@ SELECT 1+1 AS "TWO";
 --
 
 SET ROLE regress_stats_superuser;
+
 SELECT r.rolname, ss.queryid <> 0 AS queryid_bool, ss.planid <> 0 AS planid_bool, ss.plan, ss.calls
   FROM pg_stat_plans ss JOIN pg_roles r ON ss.userid = r.oid
-  ORDER BY r.rolname, ss.plan COLLATE "C", ss.calls;
-
---
--- regress_stats_user1 has no privileges to read the plan text, queryid
--- or planid of queries executed by others but can see statistics
--- like calls and rows.
---
-
-SET ROLE regress_stats_user1;
-SELECT r.rolname, ss.queryid <> 0 AS queryid_bool, ss.planid <> 0 AS planid_bool, ss.plan, ss.calls
-  FROM pg_stat_plans ss JOIN pg_roles r ON ss.userid = r.oid
+  WHERE ss.plan NOT LIKE '%Function Scan on pg_stat_plans%'
   ORDER BY r.rolname, ss.plan COLLATE "C", ss.calls;
 
 --
@@ -46,6 +59,7 @@ SELECT r.rolname, ss.queryid <> 0 AS queryid_bool, ss.planid <> 0 AS planid_bool
 SET ROLE regress_stats_user2;
 SELECT r.rolname, ss.queryid <> 0 AS queryid_bool, ss.planid <> 0 AS planid_bool, ss.plan, ss.calls
   FROM pg_stat_plans ss JOIN pg_roles r ON ss.userid = r.oid
+  WHERE ss.plan NOT LIKE '%Function Scan on pg_stat_plans%'
   ORDER BY r.rolname, ss.plan COLLATE "C", ss.calls;
 
 --

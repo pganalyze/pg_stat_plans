@@ -31,6 +31,13 @@ SELECT 1 FROM pg_class WHERE relname = 'pg_class';
 (1 row)
 
 SET enable_indexscan = on;
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
                              plan                             | calls 
 --------------------------------------------------------------+-------
@@ -43,10 +50,11 @@ SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
  Limit                                                       +|     1
    ->  Seq Scan on pg_class                                   | 
  Result                                                       |     1
+ Result                                                       |     1
  Sort                                                        +|     0
    Sort Key: pg_stat_plans.plan COLLATE "C"                  +| 
    ->  Function Scan on pg_stat_plans                         | 
-(5 rows)
+(6 rows)
 
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
  t 
@@ -76,6 +84,13 @@ SELECT a.attname,
  tableoid | 
 (1 row)
 
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
                                      plan                                      | calls 
 -------------------------------------------------------------------------------+-------
@@ -91,10 +106,11 @@ SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
                  ->  Seq Scan on pg_attrdef d                                 +| 
                        Filter: ((adrelid = a.attrelid) AND (adnum = a.attnum)) | 
  Result                                                                        |     1
+ Result                                                                        |     1
  Sort                                                                         +|     0
    Sort Key: pg_stat_plans.plan COLLATE "C"                                   +| 
    ->  Function Scan on pg_stat_plans                                          | 
-(4 rows)
+(5 rows)
 
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
  t 
@@ -172,6 +188,13 @@ select * from lp where a not in ('a', 'd');
 ---
 (0 rows)
 
+-- Wait for pending stats to be flushed
+SELECT pg_sleep(1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
 SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
                                       plan                                      | calls 
 --------------------------------------------------------------------------------+-------
@@ -243,6 +266,7 @@ SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
    ->  Seq Scan on lp_default lp_4                                             +| 
          Filter: (a <> ALL ('{a,d}'::bpchar[]))                                 | 
  Result                                                                         |     1
+ Result                                                                         |     1
  Seq Scan on lp_ad lp                                                          +|     1
    Filter: ('a'::bpchar = a)                                                    | 
  Seq Scan on lp_ad lp                                                          +|     1
@@ -252,7 +276,7 @@ SELECT plan, calls FROM pg_stat_plans ORDER BY plan COLLATE "C";
  Sort                                                                          +|     0
    Sort Key: pg_stat_plans.plan COLLATE "C"                                    +| 
    ->  Function Scan on pg_stat_plans                                           | 
-(14 rows)
+(15 rows)
 
 SELECT pg_stat_plans_reset() IS NOT NULL AS t;
  t 

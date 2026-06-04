@@ -77,6 +77,10 @@ SELECT * FROM pg_stat_plans(false);
 (5 rows)
 ```
 
+**Important:** Due to using the Postgres cumulative statistics system, statistics counters in all current Postgres versions are
+only flushed at transaction end with an up to 60 second delay to avoid lock contention. Entries will still be present with
+their plan text, but with call counts not yet updated. Work is ongoing upstream to improve this in future Postgres releases.
+
 You can also group by `queryid` retrieved from `pg_stat_statements`, to get the different plans chosen for the same query. For example, we can see different plans being chosen based on whether a table was expected to have data or not, and Postgres falling back to a sequential scan and in efficient Hash Join incorrectly:
 
 ```sql
