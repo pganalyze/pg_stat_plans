@@ -211,15 +211,16 @@ branch, and using the correct prefix to be used for the files:
 
 ## Configuration
 
-| setting                       | possible values | default | description                                                                                                                 |
-|-------------------------------|-----------------|---------|-----------------------------------------------------------------------------------------------------------------------------|
-| pg_stat_plans.max             | 100 - INT_MAX/2 | 5000    | Sets the maximum number of plans tracked by pg_stat_plans in shared memory.                                                 |
-| pg_stat_plans.max_size        | 100 - 1048576   | 8192    | Sets the maximum size of an individual plan text (in bytes) tracked by pg_stat_plans.                                       |
-| pg_stat_plans.max_plan_memory | 256kB - 2TB     | 16MB    | Sets the total memory limit for plan text storage. When exhausted, new plans are still tracked but without their plan text. |
-| pg_stat_plans.track           | top<br>all      | top     | Selects which plans are tracked by pg_stat_plans.                                                                           |
-| pg_stat_plans.compress        | none<br>zstd    | none    | Select compression used by pg_stat_plans.                                                                                   |
+| setting                       | possible values | default | description                                                                                                                                   |
+|-------------------------------|-----------------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| pg_stat_plans.max             | 100 - INT_MAX/2 | 5000    | Sets the maximum number of plans tracked by pg_stat_plans in shared memory.                                                                   |
+| pg_stat_plans.max_size        | 100 - 1048576   | 8192    | Sets the maximum size of an individual plan text (in bytes) tracked by pg_stat_plans.                                                         |
+| pg_stat_plans.max_plan_memory | 256kB - 2TB     | 16MB    | Sets the total memory limit for plan text storage. When exhausted, new plans are still tracked but without their plan text.                   |
+| pg_stat_plans.track           | top<br>all      | top     | Selects which plans are tracked by pg_stat_plans.                                                                                             |
+| pg_stat_plans.compress        | none<br>zstd    | none    | Select compression used by pg_stat_plans.                                                                                                     |
+| pg_stat_plans.plan_advice     | off<br>on       | off     | Collects a `pg_plan_advice` string for each tracked plan on Postgres 19 or newer with `pg_plan_advice` loaded via `shared_preload_libraries`. |
 
-All configuration settings can be changed with a reload (`SIGHUP`). `max_size`, `track` and `compress` can also be set by superusers on a per connection basis.
+All configuration settings can be changed with a reload (`SIGHUP`). `max_size`, `track`, `compress` and `plan_advice` can also be set by superusers on a per connection basis.
 
 The 8kB default for `max_size` is chosen to keep plan text values under the limit for "smaller sizes" for Postgres dynamic shared memory area (DSA) used for plan texts. Up to that size, plan texts come from pooled, fixed-size superblocks that freed entries reuse efficiently; larger ones are instead allocated in blocks of individual 4kB DSA pages, rounded up from the actual size needed.
 
