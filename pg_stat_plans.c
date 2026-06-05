@@ -15,6 +15,7 @@
 
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "catalog/pg_authid.h"
 #include "commands/explain.h"
@@ -35,10 +36,17 @@
 #include "utils/pgstat_internal.h"
 #endif
 #include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
+#if PG_VERSION_NUM >= 180000
+#include "storage/dsm_registry.h"
+#endif
 #include "tcop/utility.h"
+#include "utils/dsa.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
@@ -95,10 +103,33 @@ static const struct config_enum_entry compress_options[] =
 };
 
 static int	pgsp_max = 5000;	/* max # plans to track */
-static int	pgsp_max_size = 2048;	/* max size of plan text to track (in
+static int	pgsp_max_size = 8192;	/* max size of plan text to track (in
 									 * bytes) */
 static int	pgsp_track = PGSP_TRACK_TOP;	/* tracking level */
 static int	pgsp_compress = PGSP_COMPRESS_NONE; /* compression type */
+static int	pgsp_max_plan_memory = 16384;	/* plan text DSA size limit, in KB */
+
+/*
+ * Module shared state, provisioned via the DSM registry (PG18+) or the shmem
+ * hooks (PG<18).
+ */
+typedef struct pgspSharedState
+{
+	pg_atomic_uint64 nentries;
+
+#if PG_VERSION_NUM < 190000
+	/*
+	 * Backing store for GetNamedDSA() shim on < PG19. Protected by AddinShmemInitLock.
+	 */
+	dsa_handle	plan_dsa_handle;	/* DSA_HANDLE_INVALID until created */
+	int			plan_dsa_tranche;	/* 0 until allocated */
+#endif
+}			pgspSharedState;
+
+static pgspSharedState *pgsp_shared = NULL;
+
+/* Separate DSA holding plan texts, size-limited by pg_stat_plans.max_plan_memory */
+static dsa_area *pgsp_plan_dsa = NULL;
 
 #define pgsp_enabled(level) \
 	(!IsParallelWorker() && \
@@ -127,7 +158,9 @@ typedef struct PgStatShared_PlanInfo
 								 * their own query plans */
 	bool		toplevel;		/* query executed at top level */
 
-	dsa_pointer plan_text;		/* pointer to DSA memory containing plan text */
+	dsa_pointer plan_text;		/* pointer to DSA memory containing plan text,
+								 * InvalidDsaPointer if the plan-text DSA was full
+								 * when this entry was created */
 	size_t		plan_text_size; /* size of stored plan text */
 	bool		plan_text_truncated;	/* whether stored plan text was
 										 * truncated due to text size limit */
@@ -154,6 +187,7 @@ typedef struct PgStatShared_Plan
 
 static bool plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 static uint64 pgsp_calculate_plan_id(PlannedStmt *result);
+static void pgsp_attach_shmem(void);
 
 static const PgStat_KindInfo plan_stats = {
 	.name = "plan_stats",
@@ -246,45 +280,115 @@ pgsp_explain_plan(QueryDesc *queryDesc)
 	return es_str->data;
 }
 
+/* Copied from pgstat_shmem.c (not exported, and we can't use alternate APIs) */
+static void
+pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat)
+{
+	dsa_pointer pdsa;
+	PgStat_Kind kind = shent->key.kind;
+
+	/*
+	 * Fetch dsa pointer before deleting entry - that way we can free the
+	 * memory after releasing the lock.
+	 */
+	pdsa = shent->body;
+
+	if (!hstat)
+		dshash_delete_entry(pgStatCustomLocal.shared_hash, shent);
+	else
+		dshash_delete_current(hstat);
+
+	dsa_free(pgStatCustomLocal.dsa, pdsa);
+
+#if PG_VERSION_NUM >= 190000
+	/* Decrement entry count, if required. */
+	if (pgstat_get_kind_info(kind)->track_entry_count)
+		pg_atomic_sub_fetch_u64(&pgStatCustomLocal.shmem->entry_counts[kind - 1], 1);
+#endif
+}
+
 static void
 pgstat_gc_plan_memory(void)
 {
 	dshash_seq_status hstat;
 	PgStatShared_HashEntry *p;
+	List	   *victims = NIL;
+	ListCell   *lc;
 
-	/* dshash entry is not modified, take shared lock */
+	/*
+	 * Phase 1: find reclaimable entries under a *shared* scan.
+	 *
+	 * An entry is reclaimable once it is dropped and its refcount has fallen to
+	 * 1 -- the single extra reference pg_stat_plans took at creation. A dropped
+	 * entry can gain no new references. If a backend still holds a reference we
+	 * skip it now and reclaim it on a later pass, once
+	 * pgstat_request_entry_refs_gc() has nudged that backend to let go.
+	 */
 	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
-		PgStatShared_Common *header;
-		PgStat_StatPlanEntry *statent;
+		PgStat_HashKey *key;
 
 		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
 			continue;
-
-		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
-
-		if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
+		if (pg_atomic_read_u32(&p->refcount) != 1)
 			continue;
 
+		key = palloc(sizeof(PgStat_HashKey));
+		*key = p->key;
+		victims = lappend(victims, key);
+	}
+	dshash_seq_term(&hstat);
+
+	/*
+	 * Phase 2: reclaim each victim under a brief exclusive lock on just its own
+	 * partition. We re-check the entry under that lock, because between the two
+	 * phases it may have been reclaimed by a concurrent GC pass, or resurrected
+	 * (reinitialized) by a new query reusing the same key.
+	 */
+	foreach(lc, victims)
+	{
+		PgStat_HashKey *key = (PgStat_HashKey *) lfirst(lc);
+		PgStatShared_Common *header;
+		PgStat_StatPlanEntry *statent;
+
+		p = dshash_find(pgStatCustomLocal.shared_hash, key, true);
+		if (p == NULL)
+			continue;			/* already reclaimed by another backend */
+
+		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS ||
+			pg_atomic_read_u32(&p->refcount) != 1)
+		{
+			/* referenced again or resurrected since phase 1 -- leave it */
+			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
+			continue;
+		}
+
+		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
 		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
 		/*
-		 * Clean up this entry's plan text allocation, if we haven't done so
-		 * already
+		 * Free the plan text, if any was stored, from our plan-text DSA. The
+		 * exclusive partition lock excludes the SRF reader and any reuse; with
+		 * refcount == 1 no backend holds a reference, so no header lock is
+		 * needed to touch the entry body.
 		 */
 		if (DsaPointerIsValid(statent->info.plan_text))
 		{
-			dsa_free(pgStatCustomLocal.dsa, statent->info.plan_text);
+			dsa_free(pgsp_plan_dsa, statent->info.plan_text);
 			statent->info.plan_text = InvalidDsaPointer;
-
-			/* Allow removal of the shared stats entry */
-			pg_atomic_fetch_sub_u32(&p->refcount, 1);
 		}
 
-		LWLockRelease(&header->lock);
+		/* Drop our extra reference (1 -> 0) and free the entry. */
+		pg_atomic_fetch_sub_u32(&p->refcount, 1);
+
+		pgstat_free_entry(p, NULL);
+
+		/* Work is done */
+		pg_atomic_fetch_sub_u64(&pgsp_shared->nentries, 1);
 	}
-	dshash_seq_term(&hstat);
+
+	list_free_deep(victims);
 
 	/* Encourage other backends to clean up dropped entry refs */
 	pgstat_custom_request_entry_refs_gc();
@@ -383,42 +487,24 @@ pgstat_dealloc_plans(void)
 static void
 pgstat_gc_plans(void)
 {
-	dshash_seq_status hstat;
-	PgStatShared_HashEntry *p;
-	bool		have_dropped_entries = false;
-	size_t		plan_entry_count = 0;
-
 	/* TODO: Prevent concurrent GC cycles - flag an active GC run somehow */
 
 	/*
-	 * Count our active entries, and whether there are any dropped entries we
-	 * may need to clean up at the end.
+	 * Decide whether to run a cycle from the live-entry counter instead of
+	 * scanning the whole hash to count. The counter is maintained on entry
+	 * creation and in pgstat_gc_plan_memory(), and the caller invokes us with
+	 * no entry lock held, so this is cheap and lock-order safe.
 	 */
-	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
-	while ((p = dshash_seq_next(&hstat)) != NULL)
-	{
-		if (p->key.kind != PGSTAT_KIND_PLANS)
-			continue;
-
-		if (p->dropped)
-			have_dropped_entries = true;
-		else
-			plan_entry_count++;
-	}
-	dshash_seq_term(&hstat);
+	if (pg_atomic_read_u64(&pgsp_shared->nentries) <= (uint64) pgsp_max)
+		return;
 
 	/*
-	 * If we're over the limit, delete entries with lowest usage factor.
+	 * Over the limit: drop the lowest-usage entries, then reclaim the plan-text
+	 * memory of the entries just dropped (and any other dropped entries) and
+	 * free them, which is also what keeps nentries in step.
 	 */
-	if (plan_entry_count > pgsp_max)
-	{
-		pgstat_dealloc_plans();
-		have_dropped_entries = true;	/* Assume we did some work */
-	}
-
-	/* If there are dropped entries, clean up their plan memory if needed */
-	if (have_dropped_entries)
-		pgstat_gc_plan_memory();
+	pgstat_dealloc_plans();
+	pgstat_gc_plan_memory();
 }
 
 static char *
@@ -618,6 +704,19 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 	planId = pgsp_calculate_plan_id(queryDesc->plannedstmt);
 #endif
 
+	/* Make sure our shared state is attached before we touch the counter. */
+	pgsp_attach_shmem();
+
+	/*
+	 * Run garbage collection if needed before creating a new entry. Doing it
+	 * now, rather than inline while holding the new entry's header lock, means
+	 * GC's hash-wide scans never run under a held entry lock, and the entry
+	 * created here cannot be chosen as a victim because it does not exist yet.
+	 */
+	if (pgsp_shared != NULL &&
+		pg_atomic_read_u64(&pgsp_shared->nentries) > (uint64) pgsp_max)
+		pgstat_gc_plans();
+
 	entry_ref = pgstat_custom_prep_pending_entry(PGSTAT_KIND_PLANS, MyDatabaseId,
 										  PGSTAT_PLAN_IDX(queryId, planId, userid, toplevel), &newly_created);
 
@@ -634,29 +733,44 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 		(void) pgstat_custom_lock_entry(entry_ref, false);
 
-		/*
-		 * We may be over the limit, so run GC now before saving entry (we do
-		 * this whilst holding the lock on the new entry so we don't remove it
-		 * by accident)
-		 */
-		pgstat_gc_plans();
-
 		shstatent->stats.info.planid = planId;
 		shstatent->stats.info.queryid = queryId;
 		shstatent->stats.info.userid = userid;
 		shstatent->stats.info.toplevel = toplevel;
-		shstatent->stats.info.plan_text = dsa_allocate(pgStatCustomLocal.dsa, stored_plan_size);
-		memcpy(dsa_get_address(pgStatCustomLocal.dsa, shstatent->stats.info.plan_text), stored_plan, stored_plan_size);
-		shstatent->stats.info.plan_text_size = stored_plan_size;
-		shstatent->stats.info.plan_text_truncated = stored_plan_truncated;
-		shstatent->stats.info.plan_text_compression = stored_plan_compression;
+
+		/*
+		 * Store the plan text in our separate, size-limited DSA. If that DSA is
+		 * full, keep the entry but without text (DSA_ALLOC_NO_OOM returns
+		 * InvalidDsaPointer rather than erroring) -- the entry's counters are
+		 * still useful and the SRF renders a NULL plan.
+		 */
+		shstatent->stats.info.plan_text =
+			dsa_allocate_extended(pgsp_plan_dsa, stored_plan_size, DSA_ALLOC_NO_OOM);
+		if (DsaPointerIsValid(shstatent->stats.info.plan_text))
+		{
+			memcpy(dsa_get_address(pgsp_plan_dsa, shstatent->stats.info.plan_text), stored_plan, stored_plan_size);
+			shstatent->stats.info.plan_text_size = stored_plan_size;
+			shstatent->stats.info.plan_text_truncated = stored_plan_truncated;
+			shstatent->stats.info.plan_text_compression = stored_plan_compression;
+		}
+		else
+		{
+			shstatent->stats.info.plan_text_size = 0;
+			shstatent->stats.info.plan_text_truncated = false;
+			shstatent->stats.info.plan_text_compression = 0;
+		}
 		shstatent->stats.info.plan_encoding = GetDatabaseEncoding();
 
 		/*
-		 * Increase refcount here so entry can't get released without us
-		 * dropping the plan text
+		 * Take an extra reference so pgstat can never free the entry (and orphan
+		 * its plan text) before pgstat_gc_plan_memory() reclaims it. We do this
+		 * for every new entry, even ones without text, so that gc_plan_memory is
+		 * the sole reclaimer: a dropped entry's refcount then falls to 1 (our
+		 * ref) and never to 0 behind our back, which keeps nentries an accurate,
+		 * drift-free bound on the live entry count.
 		 */
 		pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
+		pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
 
 		pgstat_custom_unlock_entry(entry_ref);
 
@@ -1077,28 +1191,190 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 }
 
-#if PG_VERSION_NUM < 180000
-/* Shared memory init callbacks */
+#if PG_VERSION_NUM < 190000
+/*
+ * Minimal back-port of PG19's GetNamedDSA() for our single plan-text DSA. The
+ * handle and LWLock tranche id live in our own shared state (PG19 keeps them in
+ * the core DSM registry); one backend creates the area, the rest attach. *found
+ * is false only on first creation, so the caller applies the size limit once.
+ */
+static dsa_area *
+pgsp_named_dsa(bool *found)
+{
+	dsa_area   *area;
+	MemoryContext oldcontext;
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	if (pgsp_shared->plan_dsa_tranche == 0)
+		pgsp_shared->plan_dsa_tranche = LWLockNewTrancheId();
+
+	/* The tranche id is shared, but its name table is backend-local. */
+	LWLockRegisterTranche(pgsp_shared->plan_dsa_tranche, "pg_stat_plans_plan");
+
+	/*
+	 * dsa_create()/dsa_attach() palloc the backend-local dsa_area in the current
+	 * memory context, and dsa_pin_mapping() registers a cleanup tied to it.
+	 * Switch to TopMemoryContext so they live for the whole backend, matching
+	 * what GetNamedDSA() does on PG19.
+	 */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (pgsp_shared->plan_dsa_handle == DSA_HANDLE_INVALID)
+	{
+		*found = false;
+		area = dsa_create(pgsp_shared->plan_dsa_tranche);
+		dsa_pin(area);
+		dsa_pin_mapping(area);
+		pgsp_shared->plan_dsa_handle = dsa_get_handle(area);
+	}
+	else
+	{
+		*found = true;
+		area = dsa_attach(pgsp_shared->plan_dsa_handle);
+		dsa_pin_mapping(area);
+	}
+
+	MemoryContextSwitchTo(oldcontext);
+
+	LWLockRelease(AddinShmemInitLock);
+	return area;
+}
+#endif
+
+/*
+ * Attach to (creating on first use) the separate, size-limited DSA that holds
+ * plan texts. On PG19 this is core's GetNamedDSA(); on older versions it is the
+ * shim above. The size limit is a soft cap that can be raised/lowered at
+ * runtime, so the GUC is PGC_SIGHUP (assign hook below).
+ */
+static void
+pgsp_attach_plan_dsa(void)
+{
+	bool		found;
+
+	if (pgsp_plan_dsa != NULL)
+		return;
+
+#if PG_VERSION_NUM >= 190000
+	pgsp_plan_dsa = GetNamedDSA("pg_stat_plans_plan", &found);
+#else
+	pgsp_plan_dsa = pgsp_named_dsa(&found);
+#endif
+
+	if (!found)
+		dsa_set_size_limit(pgsp_plan_dsa, (size_t) pgsp_max_plan_memory * 1024);
+}
+
+/* SIGHUP assign hook: move the live plan-text memory limit. */
+static void
+pgsp_assign_max_plan_memory(int newval, void *extra)
+{
+	if (pgsp_plan_dsa != NULL)
+		dsa_set_size_limit(pgsp_plan_dsa, (size_t) newval * 1024);
+}
+
+#if PG_VERSION_NUM >= 180000
+
+/*
+ * One-time initializer for our shared state, run by the DSM registry under its
+ * own lock the first time any backend attaches.
+ */
+#if PG_VERSION_NUM >= 190000
+static void
+pgsp_init_shmem(void *ptr, void *arg)
+#else
+static void
+pgsp_init_shmem(void *ptr)
+#endif
+{
+	pgspSharedState *state = (pgspSharedState *) ptr;
+
+	pg_atomic_init_u64(&state->nentries, 0);
+#if PG_VERSION_NUM < 190000
+	state->plan_dsa_handle = DSA_HANDLE_INVALID;
+	state->plan_dsa_tranche = 0;
+#endif
+}
+
+/*
+ * Lazily attach to our shared state via the DSM registry. Called at the top of
+ * the entry points that touch pgsp_shared / pgsp_plan_dsa. Mirrors
+ * pg_stat_statements: no shmem_request/shmem_startup hooks are needed -- the
+ * registry creates the segment on first use and hands every backend the same
+ * pointer.
+ */
+static void
+pgsp_attach_shmem(void)
+{
+	if (pgsp_shared == NULL)
+	{
+		bool		found;
+
+#if PG_VERSION_NUM >= 190000
+		pgsp_shared = GetNamedDSMSegment("pg_stat_plans",
+										 sizeof(pgspSharedState),
+										 pgsp_init_shmem, &found, NULL);
+#else
+		pgsp_shared = GetNamedDSMSegment("pg_stat_plans",
+										 sizeof(pgspSharedState),
+										 pgsp_init_shmem, &found);
+#endif
+	}
+
+	pgsp_attach_plan_dsa();
+}
+
+#else							/* PG_VERSION_NUM < 180000 */
+
+/*
+ * Before PG18 the custom cumulative stats machinery is backported in the
+ * compat shim, which still needs the classic shmem hooks; our shared state
+ * rides along in the same startup callback rather than using the DSM registry.
+ */
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
-/* Shared memory initialization when loading module */
 static void
 pgsp_shmem_request(void)
 {
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 
-	// TODO: Anything we need to do here?
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pgspSharedState)));
 }
 
 static void
 pgsp_shmem_startup(void)
 {
+	bool		found;
+
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
 	StatsCustomShmemInit();
+
+	/* Reset in case this is a restart within the postmaster */
+	pgsp_shared = NULL;
+	pgsp_plan_dsa = NULL;
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	pgsp_shared = ShmemInitStruct("pg_stat_plans",
+								  sizeof(pgspSharedState), &found);
+	if (!found)
+	{
+		pg_atomic_init_u64(&pgsp_shared->nentries, 0);
+		pgsp_shared->plan_dsa_handle = DSA_HANDLE_INVALID;
+		pgsp_shared->plan_dsa_tranche = 0;
+	}
+	LWLockRelease(AddinShmemInitLock);
+}
+
+/* The startup hook set pgsp_shared; attach the (lazily created) plan DSA. */
+static void
+pgsp_attach_shmem(void)
+{
+	pgsp_attach_plan_dsa();
 }
 
 static ClientAuthentication_hook_type prev_ClientAuthentication_hook = NULL;
@@ -1156,13 +1432,26 @@ _PG_init(void)
 							"Sets the maximum size of plan texts (in bytes) tracked by pg_stat_plans in shared memory.",
 							NULL,
 							&pgsp_max_size,
-							2048,
+							8192,
 							100,
 							1048576,	/* 1MB hard limit */
 							PGC_SUSET,
 							0,
 							NULL,
 							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_stat_plans.max_plan_memory",
+							"Sets the memory limit for plan text storage.",
+							NULL,
+							&pgsp_max_plan_memory,
+							16384,
+							256,
+							MAX_KILOBYTES,
+							PGC_SIGHUP,
+							GUC_UNIT_KB,
+							NULL,
+							pgsp_assign_max_plan_memory,
 							NULL);
 
 	DefineCustomEnumVariable("pg_stat_plans.track",
@@ -1239,6 +1528,9 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
 
+	/* Make sure our shared state is attached before gc updates the counter. */
+	pgsp_attach_shmem();
+
 	pgstat_custom_drop_matching_entries(match_plans_entries, 0);
 
 	/* Free plan text memory and allow cleanup of dropped entries */
@@ -1270,6 +1562,9 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
+
+	/* Ensure the plan-text DSA is attached before we read plan texts. */
+	pgsp_attach_shmem();
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -1311,7 +1606,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 
 		if (showplan && (is_allowed_role || statent->info.userid == userid))
 		{
-			char	   *pstr = DsaPointerIsValid(statent->info.plan_text) ? dsa_get_address(pgStatCustomLocal.dsa, statent->info.plan_text) : NULL;
+			char	   *pstr = DsaPointerIsValid(statent->info.plan_text) ? dsa_get_address(pgsp_plan_dsa, statent->info.plan_text) : NULL;
 
 			if (pstr)
 			{
