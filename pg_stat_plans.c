@@ -142,7 +142,7 @@ static dsa_area *pgsp_plan_dsa = NULL;
 #define USAGE_INCREASE			0.5 /* increase by this each time we report
 									 * stats */
 #define USAGE_DECREASE_FACTOR	(0.99)	/* decreased every
-										 * pgstat_dealloc_plans */
+										 * pgsp_dealloc_entries */
 #define USAGE_DEALLOC_PERCENT	5	/* free this % of entries at once */
 
 /*---- Function declarations ----*/
@@ -310,93 +310,6 @@ pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat)
 #endif
 }
 
-static void
-pgstat_gc_plan_memory(void)
-{
-	dshash_seq_status hstat;
-	PgStatShared_HashEntry *p;
-	List	   *victims = NIL;
-	ListCell   *lc;
-
-	/*
-	 * Phase 1: find reclaimable entries under a *shared* scan.
-	 *
-	 * An entry is reclaimable once it is dropped and its refcount has fallen to
-	 * 1 -- the single extra reference pg_stat_plans took at creation. A dropped
-	 * entry can gain no new references. If a backend still holds a reference we
-	 * skip it now and reclaim it on a later pass, once
-	 * pgstat_request_entry_refs_gc() has nudged that backend to let go.
-	 */
-	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
-	while ((p = dshash_seq_next(&hstat)) != NULL)
-	{
-		PgStat_HashKey *key;
-
-		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
-			continue;
-		if (pg_atomic_read_u32(&p->refcount) != 1)
-			continue;
-
-		key = palloc(sizeof(PgStat_HashKey));
-		*key = p->key;
-		victims = lappend(victims, key);
-	}
-	dshash_seq_term(&hstat);
-
-	/*
-	 * Phase 2: reclaim each victim under a brief exclusive lock on just its own
-	 * partition. We re-check the entry under that lock, because between the two
-	 * phases it may have been reclaimed by a concurrent GC pass, or resurrected
-	 * (reinitialized) by a new query reusing the same key.
-	 */
-	foreach(lc, victims)
-	{
-		PgStat_HashKey *key = (PgStat_HashKey *) lfirst(lc);
-		PgStatShared_Common *header;
-		PgStat_StatPlanEntry *statent;
-
-		p = dshash_find(pgStatCustomLocal.shared_hash, key, true);
-		if (p == NULL)
-			continue;			/* already reclaimed by another backend */
-
-		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS ||
-			pg_atomic_read_u32(&p->refcount) != 1)
-		{
-			/* referenced again or resurrected since phase 1 -- leave it */
-			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
-			continue;
-		}
-
-		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
-		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
-
-		/*
-		 * Free the plan text, if any was stored, from our plan-text DSA. The
-		 * exclusive partition lock excludes the SRF reader and any reuse; with
-		 * refcount == 1 no backend holds a reference, so no header lock is
-		 * needed to touch the entry body.
-		 */
-		if (DsaPointerIsValid(statent->info.plan_text))
-		{
-			dsa_free(pgsp_plan_dsa, statent->info.plan_text);
-			statent->info.plan_text = InvalidDsaPointer;
-		}
-
-		/* Drop our extra reference (1 -> 0) and free the entry. */
-		pg_atomic_fetch_sub_u32(&p->refcount, 1);
-
-		pgstat_free_entry(p, NULL);
-
-		/* Work is done */
-		pg_atomic_fetch_sub_u64(&pgsp_shared->nentries, 1);
-	}
-
-	list_free_deep(victims);
-
-	/* Encourage other backends to clean up dropped entry refs */
-	pgstat_custom_request_entry_refs_gc();
-}
-
 typedef struct PlanDeallocEntry
 {
 	PgStat_HashKey key;
@@ -420,8 +333,9 @@ entry_cmp_lru(const union ListCell *lhs, const union ListCell *rhs)
 		return 0;
 }
 
+/* Deallocate n (USAGE_DEALLOC_PERCENT) entries based on their usage value */
 static void
-pgstat_dealloc_plans(void)
+pgsp_dealloc_entries(void)
 {
 	dshash_seq_status hstat;
 	PgStatShared_HashEntry *p;
@@ -469,6 +383,32 @@ pgstat_dealloc_plans(void)
 	for_each_from(lc, entries, list_length(entries) - nvictims)
 	{
 		PlanDeallocEntry *entry = lfirst(lc);
+		PgStatShared_HashEntry *p;
+
+		/*
+		 * Free the plan text before dropping the entry. If we left it for
+		 * pgstat_gc_plan_memory() to free later, a concurrent resurrection of
+		 * the entry by pgstat_reinit_entry() could cause a query text leak,
+		 * since reinit does a memset and through that zeroes our DSA pointer.
+		 */
+		p = dshash_find(pgStatCustomLocal.shared_hash, &entry->key, true);
+		if (p != NULL)
+		{
+			PgStatShared_Common *header =
+				dsa_get_address(pgStatCustomLocal.dsa, p->body);
+			PgStat_StatPlanEntry *statent =
+				(PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+
+			LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+			if (DsaPointerIsValid(statent->info.plan_text))
+			{
+				dsa_free(pgsp_plan_dsa, statent->info.plan_text);
+				statent->info.plan_text = InvalidDsaPointer;
+			}
+			LWLockRelease(&header->lock);
+
+			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
+		}
 
 #if PG_VERSION_NUM >= 180000
 		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid);
@@ -487,8 +427,101 @@ pgstat_dealloc_plans(void)
 	pfree(entries);
 }
 
+/*
+ * Release (refcount to 0 + drop) entries after ensuring query text got freed.
+ *
+ * This is needed in addition to the entry walk (which also frees query text)
+ * because certain operations (reset function, DROP DATABASE) cause us to have
+ * entries that are dropped but whose query text has not been freed.
+ */
 static void
-pgstat_gc_plans(void)
+pgsp_dealloc_release(void)
+{
+	dshash_seq_status hstat;
+	PgStatShared_HashEntry *p;
+	List	   *victims = NIL;
+	ListCell   *lc;
+
+	/*
+	 * Phase 1: find reclaimable entries under a *shared* scan.
+	 *
+	 * An entry is reclaimable once it is dropped and its refcount has fallen to
+	 * 1 -- the single extra reference pg_stat_plans took at creation. A dropped
+	 * entry can gain no new references. If a backend still holds a reference we
+	 * skip it now and reclaim it on a later pass, once
+	 * pgstat_request_entry_refs_gc() has nudged that backend to let go.
+	 */
+	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
+	while ((p = dshash_seq_next(&hstat)) != NULL)
+	{
+		PgStat_HashKey *key;
+
+		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
+			continue;
+		if (pg_atomic_read_u32(&p->refcount) != 1)
+			continue;
+
+		key = palloc(sizeof(PgStat_HashKey));
+		*key = p->key;
+		victims = lappend(victims, key);
+	}
+	dshash_seq_term(&hstat);
+
+	/*
+	 * Phase 2: reclaim each victim under a brief exclusive lock on just its own
+	 * partition. We re-check the entry under that lock, because between the two
+	 * phases it may have been resurrected (reinitialized) by a new query reusing
+	 * the same key.
+	 */
+	foreach(lc, victims)
+	{
+		PgStat_HashKey *key = (PgStat_HashKey *) lfirst(lc);
+		PgStatShared_Common *header;
+		PgStat_StatPlanEntry *statent;
+
+		p = dshash_find(pgStatCustomLocal.shared_hash, key, true);
+		if (p == NULL)
+			continue;			/* already reclaimed by another backend */
+
+		if (!p->dropped || p->key.kind != PGSTAT_KIND_PLANS ||
+			pg_atomic_read_u32(&p->refcount) != 1)
+		{
+			/* referenced again or resurrected since phase 1 -- leave it */
+			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
+			continue;
+		}
+
+		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
+		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+
+		/*
+		 * Free the plan text, if any was still stored, from the DSA. We don't
+		 * need a header lock here since we hold the partition lock exclusively
+		 * and with refcount = 1 no backend holds a direct reference.
+		 */
+		if (DsaPointerIsValid(statent->info.plan_text))
+		{
+			dsa_free(pgsp_plan_dsa, statent->info.plan_text);
+			statent->info.plan_text = InvalidDsaPointer;
+		}
+
+		/* Drop our extra reference (1 -> 0) and free the entry. */
+		pg_atomic_fetch_sub_u32(&p->refcount, 1);
+
+		pgstat_free_entry(p, NULL);
+
+		/* Work is done */
+		pg_atomic_fetch_sub_u64(&pgsp_shared->nentries, 1);
+	}
+
+	list_free_deep(victims);
+
+	/* Encourage other backends to clean up dropped entry refs */
+	pgstat_custom_request_entry_refs_gc();
+}
+
+static void
+pgsp_dealloc(void)
 {
 	/*
 	 * Decide whether to run a cycle from the live-entry counter instead of
@@ -513,13 +546,8 @@ pgstat_gc_plans(void)
 		/* re-check now that we hold the GC slot */
 		if (pg_atomic_read_u64(&pgsp_shared->nentries) > (uint64) pgsp_max)
 		{
-			/*
-			 * Drop the lowest-usage entries, then reclaim the plan-text memory
-			 * of the entries just dropped (and any other dropped entries) and
-			 * free them, which is also what keeps nentries in step.
-			 */
-			pgstat_dealloc_plans();
-			pgstat_gc_plan_memory();
+			pgsp_dealloc_entries();
+			pgsp_dealloc_release();
 		}
 	}
 	PG_FINALLY();
@@ -737,7 +765,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 	 */
 	if (pgsp_shared != NULL &&
 		pg_atomic_read_u64(&pgsp_shared->nentries) > (uint64) pgsp_max)
-		pgstat_gc_plans();
+		pgsp_dealloc();
 
 	entry_ref = pgstat_custom_prep_pending_entry(PGSTAT_KIND_PLANS, MyDatabaseId,
 										  PGSTAT_PLAN_IDX(queryId, planId, userid, toplevel), &newly_created);
@@ -784,15 +812,23 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		shstatent->stats.info.plan_encoding = GetDatabaseEncoding();
 
 		/*
-		 * Take an extra reference so pgstat can never free the entry (and orphan
-		 * its plan text) before pgstat_gc_plan_memory() reclaims it. We do this
-		 * for every new entry, even ones without text, so that gc_plan_memory is
-		 * the sole reclaimer: a dropped entry's refcount then falls to 1 (our
-		 * ref) and never to 0 behind our back, which keeps nentries an accurate,
-		 * drift-free bound on the live entry count.
+		 * Take an extra reference so pgstat can't free the entry (and orphan
+		 * its plan text) until pgsp_dealloc_release() reclaims it. We do this
+		 * for every new entry, even ones without text, so that we have an
+		 * accurate total entry count, and gc_plan_memory is solely responsible
+		 * to ensure final cleanup.
+		 *
+		 * The exception to this are resurrected entries, which can occur when
+		 * an entry was marked as dropped, but not actually removed yet. If
+		 * a dropped entry is attempted to be recreated, the old entry gets
+		 * reset, but the reference counts are kept. We can detect this through
+		 * the generation counter, and pretend no new entry was created.
 		 */
-		pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
-		pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
+		if (pg_atomic_read_u32(&entry_ref->shared_entry->generation) == 0)
+		{
+			pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
+			pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
+		}
 
 		pgstat_custom_unlock_entry(entry_ref);
 
@@ -1558,7 +1594,7 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 	pgstat_custom_drop_matching_entries(match_plans_entries, 0);
 
 	/* Free plan text memory and allow cleanup of dropped entries */
-	pgstat_gc_plan_memory();
+	pgsp_dealloc_release();
 
 	PG_RETURN_VOID();
 }
