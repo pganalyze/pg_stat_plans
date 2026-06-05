@@ -1,4 +1,4 @@
-# pg_stat_plans 2.0 - Track per-plan call counts, execution times and EXPLAIN texts in Postgres
+# pg_stat_plans 2.1 - Track per-plan call counts, execution times and EXPLAIN texts in Postgres
 
 `pg_stat_plans` is designed for low overhead tracking of aggregate plan statistics in Postgres, by relying on hashing the plan tree with a plan ID calculation. It aims to help identify plan regressions, and get an example plan for each Postgres query run, slow and fast. Additionally, it allows showing the plan for a currently running query.
 
