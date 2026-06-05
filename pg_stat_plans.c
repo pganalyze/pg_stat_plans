@@ -117,6 +117,9 @@ typedef struct pgspSharedState
 {
 	pg_atomic_uint64 nentries;
 
+	/* Serialize garbage collection: only one backend runs it at a time. */
+	pg_atomic_flag gc_active;
+
 #if PG_VERSION_NUM < 190000
 	/*
 	 * Backing store for GetNamedDSA() shim on < PG19. Protected by AddinShmemInitLock.
@@ -487,8 +490,6 @@ pgstat_dealloc_plans(void)
 static void
 pgstat_gc_plans(void)
 {
-	/* TODO: Prevent concurrent GC cycles - flag an active GC run somehow */
-
 	/*
 	 * Decide whether to run a cycle from the live-entry counter instead of
 	 * scanning the whole hash to count. The counter is maintained on entry
@@ -499,12 +500,33 @@ pgstat_gc_plans(void)
 		return;
 
 	/*
-	 * Over the limit: drop the lowest-usage entries, then reclaim the plan-text
-	 * memory of the entries just dropped (and any other dropped entries) and
-	 * free them, which is also what keeps nentries in step.
+	 * Serialize GC cycles. Multiple backends can be over the limit at once, as
+	 * we trigger GC on every over-limit execution); if they all deallocated
+	 * concurrently they would pick overlapping victims and the second drop of
+	 * a victim would raise "trying to drop stats entry already dropped".
 	 */
-	pgstat_dealloc_plans();
-	pgstat_gc_plan_memory();
+	if (!pg_atomic_test_set_flag(&pgsp_shared->gc_active))
+		return;
+
+	PG_TRY();
+	{
+		/* re-check now that we hold the GC slot */
+		if (pg_atomic_read_u64(&pgsp_shared->nentries) > (uint64) pgsp_max)
+		{
+			/*
+			 * Drop the lowest-usage entries, then reclaim the plan-text memory
+			 * of the entries just dropped (and any other dropped entries) and
+			 * free them, which is also what keeps nentries in step.
+			 */
+			pgstat_dealloc_plans();
+			pgstat_gc_plan_memory();
+		}
+	}
+	PG_FINALLY();
+	{
+		pg_atomic_clear_flag(&pgsp_shared->gc_active);
+	}
+	PG_END_TRY();
 }
 
 static char *
@@ -1291,6 +1313,7 @@ pgsp_init_shmem(void *ptr)
 	pgspSharedState *state = (pgspSharedState *) ptr;
 
 	pg_atomic_init_u64(&state->nentries, 0);
+	pg_atomic_init_flag(&state->gc_active);
 #if PG_VERSION_NUM < 190000
 	state->plan_dsa_handle = DSA_HANDLE_INVALID;
 	state->plan_dsa_tranche = 0;
@@ -1364,6 +1387,7 @@ pgsp_shmem_startup(void)
 	if (!found)
 	{
 		pg_atomic_init_u64(&pgsp_shared->nentries, 0);
+		pg_atomic_init_flag(&pgsp_shared->gc_active);
 		pgsp_shared->plan_dsa_handle = DSA_HANDLE_INVALID;
 		pgsp_shared->plan_dsa_tranche = 0;
 	}
