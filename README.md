@@ -8,8 +8,6 @@ Plans have the same plan IDs when they have the same "plan shape", which intends
 
 This project is inspired by multiple Postgres community projects, including the original [pg_stat_plans](https://github.com/2ndQuadrant/pg_stat_plans) extension (unmaintained), with a goal of upstreaming parts of this extension into the core Postgres project over time.
 
-**Experimental**. May still change in incompatible ways without notice. Not (yet) recommended for production use.
-
 ## Supported PostgreSQL versions
 
 Requires at least Postgres 16.
