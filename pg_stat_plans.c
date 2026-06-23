@@ -423,7 +423,9 @@ pgsp_dealloc_entries(void)
 			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
 		}
 
-#if PG_VERSION_NUM >= 180000
+#if PG_VERSION_NUM >= 190000
+		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid, true);
+#elif PG_VERSION_NUM >= 180000
 		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid);
 #else
 		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objoid);
