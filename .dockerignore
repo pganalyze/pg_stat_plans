@@ -1,0 +1,31 @@
+# Keep the build context small: only the extension sources are needed to build
+# the CloudNativePG extension image (see Dockerfile). Everything below is either
+# build output, test scaffolding, or local development cruft.
+.git
+.github
+.deps
+log
+results
+tmp_check
+tmp_check_iso
+plans
+specs
+t
+sql
+expected
+
+# Build artifacts (regenerated inside the image)
+*.o
+*.bc
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+objfiles.txt
+regression.diffs
+regression.out
+
+# Docs / planning notes
+*.md
+TODO*.md
