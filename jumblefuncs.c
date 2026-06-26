@@ -16,6 +16,11 @@
 #include "access/transam.h"
 #include "catalog/pg_proc.h"
 #include "common/hashfn.h"
+#if PG_VERSION_NUM >= 170000
+#include "common/hashfn_unstable.h"
+#else
+#include "compat_16_17/fasthash.h"
+#endif
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/queryjumble.h"
@@ -24,11 +29,15 @@
 
 #include "jumblefuncs.h"
 
-#define JUMBLE_SIZE				1024	/* query serialization buffer size */
+/*
+ * We store a fasthash_state in the memory pointed to by jstate->jumble,
+ * using streaming fasthash instead of the upstream Jenkins-based buffer
+ * approach.  This avoids the 1024-byte buffer, periodic rehashing, and
+ * the overhead of hash_any_extended calls.
+ */
+#define JUMBLE_HASH_STATE(jstate) ((fasthash_state *) (jstate)->jumble)
 
 static JumbleState *InitJumbleInternal(bool record_clocations);
-static void AppendJumbleInternal(JumbleState *jstate,
-								 const unsigned char *value, Size size);
 #if PG_VERSION_NUM >= 180000
 static void _jumbleElements(JumbleState *jstate, List *elements, Node *node);
 static void _jumbleParam(JumbleState *jstate, Node *node);
@@ -56,11 +65,14 @@ static JumbleState *
 InitJumbleInternal(bool record_clocations)
 {
 	JumbleState *jstate;
+	fasthash_state *hs;
 
 	jstate = (JumbleState *) palloc(sizeof(JumbleState));
 
-	/* Set up workspace for query jumbling */
-	jstate->jumble = (unsigned char *) palloc(JUMBLE_SIZE);
+	/* Set up fasthash state for streaming plan jumbling */
+	hs = (fasthash_state *) palloc(sizeof(fasthash_state));
+	fasthash_init(hs, 0);
+	jstate->jumble = (unsigned char *) hs;
 	jstate->jumble_len = 0;
 
 	if (record_clocations)
@@ -112,78 +124,38 @@ HashJumbleState(JumbleState *jstate)
 		FlushPendingNulls(jstate);
 #endif
 
-	/* Process the jumble buffer and produce the hash value */
-	return DatumGetUInt64(hash_any_extended(jstate->jumble,
-											jstate->jumble_len,
-											0));
+	return fasthash_final64(JUMBLE_HASH_STATE(jstate), jstate->jumble_len);
 }
 
 /*
- * AppendJumbleInternal: Internal function for appending to the jumble buffer
- *
- * Note: Callers must ensure that size > 0.
+ * AppendJumbleVarlen: Accumulate a variable-length value into the fasthash
+ * state, processing it in 8-byte chunks.
  */
 static pg_attribute_always_inline void
-AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
-					 Size size)
+AppendJumbleVarlen(JumbleState *jstate, const unsigned char *item, Size size)
 {
-	unsigned char *jumble = jstate->jumble;
-	Size		jumble_len = jstate->jumble_len;
+	fasthash_state *hs = JUMBLE_HASH_STATE(jstate);
+	Size		orig_size = size;
 
-	/* Ensure the caller didn't mess up */
 	Assert(size > 0);
 
-	/*
-	 * Fast path for when there's enough space left in the buffer.  This is
-	 * worthwhile as means the memcpy can be inlined into very efficient code
-	 * when 'size' is a compile-time constant.
-	 */
-	if (likely(size <= JUMBLE_SIZE - jumble_len))
+	while (size >= FH_SIZEOF_ACCUM)
 	{
-		memcpy(jumble + jumble_len, item, size);
-		jstate->jumble_len += size;
-
-#if PG_VERSION_NUM >= 180000
-#ifdef USE_ASSERT_CHECKING
-		jstate->total_jumble_len += size;
-#endif
-#endif
-
-		return;
+		fasthash_accum(hs, (const char *) item, FH_SIZEOF_ACCUM);
+		item += FH_SIZEOF_ACCUM;
+		size -= FH_SIZEOF_ACCUM;
 	}
 
-	/*
-	 * Whenever the jumble buffer is full, we hash the current contents and
-	 * reset the buffer to contain just that hash value, thus relying on the
-	 * hash to summarize everything so far.
-	 */
-	do
-	{
-		Size		part_size;
+	if (size > 0)
+		fasthash_accum(hs, (const char *) item, size);
 
-		if (unlikely(jumble_len >= JUMBLE_SIZE))
-		{
-			uint64		start_hash;
-
-			start_hash = DatumGetUInt64(hash_any_extended(jumble,
-														  JUMBLE_SIZE, 0));
-			memcpy(jumble, &start_hash, sizeof(start_hash));
-			jumble_len = sizeof(start_hash);
-		}
-		part_size = Min(size, JUMBLE_SIZE - jumble_len);
-		memcpy(jumble + jumble_len, item, part_size);
-		jumble_len += part_size;
-		item += part_size;
-		size -= part_size;
+	jstate->jumble_len += orig_size;
 
 #if PG_VERSION_NUM >= 180000
 #ifdef USE_ASSERT_CHECKING
-		jstate->total_jumble_len += part_size;
+	jstate->total_jumble_len += orig_size;
 #endif
 #endif
-	} while (size > 0);
-
-	jstate->jumble_len = jumble_len;
 }
 
 /*
@@ -198,7 +170,7 @@ AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
 		FlushPendingNulls(jstate);
 #endif
 
-	AppendJumbleInternal(jstate, value, size);
+	AppendJumbleVarlen(jstate, value, size);
 }
 
 #if PG_VERSION_NUM >= 180000
@@ -214,18 +186,38 @@ AppendJumbleNull(JumbleState *jstate)
 #endif
 
 /*
+ * AppendJumbleFixed
+ *		Accumulate a small fixed-size value (1-8 bytes) directly into the
+ *		fasthash state.
+ */
+static pg_attribute_always_inline void
+AppendJumbleFixed(JumbleState *jstate, const unsigned char *value, Size size)
+{
+	fasthash_state *hs = JUMBLE_HASH_STATE(jstate);
+
+#if PG_VERSION_NUM >= 180000
+	if (jstate->pending_nulls > 0)
+		FlushPendingNulls(jstate);
+#endif
+
+	fasthash_accum(hs, (const char *) value, size);
+	jstate->jumble_len += size;
+
+#if PG_VERSION_NUM >= 180000
+#ifdef USE_ASSERT_CHECKING
+	jstate->total_jumble_len += size;
+#endif
+#endif
+}
+
+/*
  * AppendJumble8
  *		Add the first byte from the given 'value' pointer to the jumble state
  */
 static pg_noinline void
 AppendJumble8(JumbleState *jstate, const unsigned char *value)
 {
-#if PG_VERSION_NUM >= 180000
-	if (jstate->pending_nulls > 0)
-		FlushPendingNulls(jstate);
-#endif
-
-	AppendJumbleInternal(jstate, value, 1);
+	AppendJumbleFixed(jstate, value, 1);
 }
 
 /*
@@ -236,12 +228,7 @@ AppendJumble8(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble16(JumbleState *jstate, const unsigned char *value)
 {
-#if PG_VERSION_NUM >= 180000
-	if (jstate->pending_nulls > 0)
-		FlushPendingNulls(jstate);
-#endif
-
-	AppendJumbleInternal(jstate, value, 2);
+	AppendJumbleFixed(jstate, value, 2);
 }
 
 /*
@@ -252,12 +239,7 @@ AppendJumble16(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble32(JumbleState *jstate, const unsigned char *value)
 {
-#if PG_VERSION_NUM >= 180000
-	if (jstate->pending_nulls > 0)
-		FlushPendingNulls(jstate);
-#endif
-
-	AppendJumbleInternal(jstate, value, 4);
+	AppendJumbleFixed(jstate, value, 4);
 }
 
 /*
@@ -268,28 +250,25 @@ AppendJumble32(JumbleState *jstate, const unsigned char *value)
 static pg_noinline void
 AppendJumble64(JumbleState *jstate, const unsigned char *value)
 {
-#if PG_VERSION_NUM >= 180000
-	if (jstate->pending_nulls > 0)
-		FlushPendingNulls(jstate);
-#endif
-
-	AppendJumbleInternal(jstate, value, 8);
+	AppendJumbleFixed(jstate, value, 8);
 }
 
 #if PG_VERSION_NUM >= 180000
 /*
  * FlushPendingNulls
- *		Incorporate the pending_nulls value into the jumble buffer.
+ *		Incorporate the pending_nulls value into the fasthash state.
  *
  * Note: Callers must ensure that there's at least 1 pending NULL.
  */
 static pg_attribute_always_inline void
 FlushPendingNulls(JumbleState *jstate)
 {
+	fasthash_state *hs = JUMBLE_HASH_STATE(jstate);
+
 	Assert(jstate->pending_nulls > 0);
 
-	AppendJumbleInternal(jstate,
-						 (const unsigned char *) &jstate->pending_nulls, 4);
+	fasthash_accum(hs, (const char *) &jstate->pending_nulls, 4);
+	jstate->jumble_len += 4;
 	jstate->pending_nulls = 0;
 }
 #endif
