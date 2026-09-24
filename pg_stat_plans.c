@@ -296,7 +296,9 @@ static void
 pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat)
 {
 	dsa_pointer pdsa;
+#if PG_VERSION_NUM >= 190000
 	PgStat_Kind kind = shent->key.kind;
+#endif
 
 	/*
 	 * Fetch dsa pointer before deleting entry - that way we can free the
@@ -391,7 +393,6 @@ pgsp_dealloc_entries(void)
 	for_each_from(lc, entries, list_length(entries) - nvictims)
 	{
 		PlanDeallocEntry *entry = lfirst(lc);
-		PgStatShared_HashEntry *p;
 
 		/*
 		 * Free the plan text (and any advice string) before dropping the entry.
