@@ -16,7 +16,7 @@ Showing plans of running queries requires Postgres 18 or newer, due to relying o
 
 Uses pluggable cumulative statistics ([7949d95945](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=7949d9594582ab49dee221e1db1aa5401ace49d4)) on Postgres 18. On Postgres 16 and 17 a shim that replicates similar functionality is used.
 
-## Installation
+## Installation from source
 
 You can use `make install` to build and install the extension. This requires having a `pg_config` in your path that references a Postgres 16 or newer installation. You can optionally build with `zstd` support for compressing plan texts in shared memory.
 
@@ -30,6 +30,45 @@ pg_stat_plans.compress = 'zstd'
 ```
 
 Whilst `pg_stat_statements` is not directly required to use `pg_stat_plans`, you will likely want that in practice to make effective use of this extension.
+
+### Installation in CloudNativePG
+
+On Postgres 18 and newer you can load `pg_stat_plans` into a [CloudNativePG](https://cloudnative-pg.io/) cluster as an [extension image volume](https://cloudnative-pg.io/docs/current/imagevolume_extensions/), without building a custom operand image.
+
+Pre-built, multi-arch (amd64/arm64) OCI images are published to the GitHub Container Registry, following the [CloudNativePG extension image naming convention](https://github.com/cloudnative-pg/postgres-extensions-containers#naming--tagging-convention) `<ext_version>-<timestamp>-<pg_major>-<distro>`, plus a rolling tag without the timestamp:
+
+```
+# Immutable (a specific build)
+ghcr.io/pganalyze/pg_stat_plans:2.1.0-202506241200-18-trixie
+# Rolling (latest build for this extension/Postgres/distro)
+ghcr.io/pganalyze/pg_stat_plans:2.1.0-18-trixie
+```
+
+> Image volume extensions require Postgres 18 or newer (they rely on the `extension_control_path` setting). The shared library must match the Postgres major version, OS distribution and CPU architecture of your operand image; the published images target the official CloudNativePG Postgres images, currently based on Debian Trixie.
+
+Reference the image from your `Cluster` resource and set `shared_preload_libraries` to enable the extension:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: example
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  postgresql:
+    shared_preload_libraries:
+      - pg_stat_plans
+    parameters:
+      # Optionally, enable zstd compression for plan texts
+      pg_stat_plans.compress: "zstd"
+    extensions:
+      - name: pg_stat_plans
+        image:
+          reference: ghcr.io/pganalyze/pg_stat_plans:2.1.0-18-trixie
+  storage:
+    size: 1Gi
+```
 
 ## Usage
 

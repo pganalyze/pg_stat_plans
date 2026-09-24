@@ -1,0 +1,135 @@
+name: OCI extension image
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    name: Build (PostgreSQL ${{ matrix.pg }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: 18
+            debian: trixie
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            DEBIAN_SUITE=${{ matrix.debian }}
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:pg${{ matrix.pg }}-pr
+
+  build_push:
+    name: Build & Push (PostgreSQL ${{ matrix.pg }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: 18
+            debian: trixie
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags follow the CloudNativePG extension-image convention:
+      #   <ext_version>-<timestamp>-<pg_version>-<distro>  (immutable)
+      #   <ext_version>-<pg_version>-<distro>              (rolling)
+      - name: Compute tags and labels
+        id: meta
+        env:
+          PG: ${{ matrix.pg }}
+          DISTRO: ${{ matrix.debian }}
+        run: |
+          ts=$(date -u +%Y%m%d%H%M)
+          created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sql_version=$(sed -n "s/^default_version = '\(.*\)'/\1/p" pg_stat_plans.control)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="$sql_version"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE_NAME:$version-$ts-$PG-$DISTRO"
+            echo "$IMAGE_NAME:$version-$PG-$DISTRO"
+            echo "EOF"
+            echo "labels<<EOF"
+            echo "io.cloudnativepg.image.base.name=debian:$DISTRO-slim"
+            echo "io.cloudnativepg.image.base.pgmajor=$PG"
+            echo "io.cloudnativepg.image.base.os=$DISTRO"
+            echo "io.cloudnativepg.image.sql.version=$sql_version"
+            echo "org.opencontainers.image.created=$created"
+            echo "org.opencontainers.image.version=$version"
+            echo "org.opencontainers.image.revision=$GITHUB_SHA"
+            echo "org.opencontainers.image.title=pg_stat_plans"
+            echo "org.opencontainers.image.description=pg_stat_plans CloudNativePG extension image (PostgreSQL $PG, $DISTRO)"
+            echo "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            echo "org.opencontainers.image.licenses=PostgreSQL"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            PG_MAJOR=${{ matrix.pg }}
+            DEBIAN_SUITE=${{ matrix.debian }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
