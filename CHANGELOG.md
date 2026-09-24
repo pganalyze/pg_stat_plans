@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.1   2026-09-23
+
+* Remove experimental marker
+  - The design has been sufficiently reviewed and aligns with the direction
+    of pg_stat_statements, and additional stress testing has been done on
+    concurrency and scaling issues
+* Postgres 19: Pass missing_ok=true for pgstat_drop_entry
+  - Stats entries can get dropped outside of the extension's control, e.g.
+    when a database is dropped. This avoids errors when attempting to drop
+    an already dropped stats entry.
+* Postgres 19: Update jumble funcs for Postgres 19 beta 4
+* Fix compiler warnings
+
+
 ## 2.1.0   2026-06-05
 
 * Postgres 19 support
