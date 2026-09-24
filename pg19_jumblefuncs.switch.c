@@ -192,12 +192,6 @@
 			case T_ReturningExpr:
 				_jumbleReturningExpr(jstate, expr);
 				break;
-			case T_GraphLabelRef:
-				_jumbleGraphLabelRef(jstate, expr);
-				break;
-			case T_GraphPropertyRef:
-				_jumbleGraphPropertyRef(jstate, expr);
-				break;
 			case T_TargetEntry:
 				_jumbleTargetEntry(jstate, expr);
 				break;
@@ -212,9 +206,6 @@
 				break;
 			case T_OnConflictExpr:
 				_jumbleOnConflictExpr(jstate, expr);
-				break;
-			case T_ForPortionOfExpr:
-				_jumbleForPortionOfExpr(jstate, expr);
 				break;
 			case T_Query:
 				_jumbleQuery(jstate, expr);
@@ -282,9 +273,6 @@
 			case T_RangeTableFuncCol:
 				_jumbleRangeTableFuncCol(jstate, expr);
 				break;
-			case T_RangeGraphTable:
-				_jumbleRangeGraphTable(jstate, expr);
-				break;
 			case T_RangeTableSample:
 				_jumbleRangeTableSample(jstate, expr);
 				break;
@@ -318,17 +306,8 @@
 			case T_PartitionRangeDatum:
 				_jumblePartitionRangeDatum(jstate, expr);
 				break;
-			case T_SinglePartitionSpec:
-				_jumbleSinglePartitionSpec(jstate, expr);
-				break;
 			case T_PartitionCmd:
 				_jumblePartitionCmd(jstate, expr);
-				break;
-			case T_GraphPattern:
-				_jumbleGraphPattern(jstate, expr);
-				break;
-			case T_GraphElementPattern:
-				_jumbleGraphElementPattern(jstate, expr);
 				break;
 			case T_RangeTblEntry:
 				_jumbleRangeTblEntry(jstate, expr);
@@ -356,9 +335,6 @@
 				break;
 			case T_RowMarkClause:
 				_jumbleRowMarkClause(jstate, expr);
-				break;
-			case T_ForPortionOfClause:
-				_jumbleForPortionOfClause(jstate, expr);
 				break;
 			case T_WithClause:
 				_jumbleWithClause(jstate, expr);
@@ -773,24 +749,6 @@
 				break;
 			case T_CreateCastStmt:
 				_jumbleCreateCastStmt(jstate, expr);
-				break;
-			case T_CreatePropGraphStmt:
-				_jumbleCreatePropGraphStmt(jstate, expr);
-				break;
-			case T_PropGraphVertex:
-				_jumblePropGraphVertex(jstate, expr);
-				break;
-			case T_PropGraphEdge:
-				_jumblePropGraphEdge(jstate, expr);
-				break;
-			case T_PropGraphLabelAndProperties:
-				_jumblePropGraphLabelAndProperties(jstate, expr);
-				break;
-			case T_PropGraphProperties:
-				_jumblePropGraphProperties(jstate, expr);
-				break;
-			case T_AlterPropGraphStmt:
-				_jumbleAlterPropGraphStmt(jstate, expr);
 				break;
 			case T_CreateTransformStmt:
 				_jumbleCreateTransformStmt(jstate, expr);
