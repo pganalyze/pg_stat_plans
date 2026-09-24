@@ -461,6 +461,7 @@ _jumbleJsonConstructorExpr(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(coercion);
 	JUMBLE_NODE(returning);
 	JUMBLE_NODE(orig_query);
+	JUMBLE_NODE(format);
 	JUMBLE_FIELD(absent_on_null);
 	JUMBLE_FIELD(unique);
 }
@@ -633,26 +634,6 @@ _jumbleReturningExpr(JumbleState *jstate, Node *node)
 }
 
 static void
-_jumbleGraphLabelRef(JumbleState *jstate, Node *node)
-{
-	GraphLabelRef *expr = (GraphLabelRef *) node;
-
-	JUMBLE_FIELD(labelid);
-}
-
-static void
-_jumbleGraphPropertyRef(JumbleState *jstate, Node *node)
-{
-	GraphPropertyRef *expr = (GraphPropertyRef *) node;
-
-	JUMBLE_STRING(elvarname);
-	JUMBLE_FIELD(propid);
-	JUMBLE_FIELD(typeId);
-	JUMBLE_FIELD(typmod);
-	JUMBLE_FIELD(collation);
-}
-
-static void
 _jumbleTargetEntry(JumbleState *jstate, Node *node)
 {
 	TargetEntry *expr = (TargetEntry *) node;
@@ -709,30 +690,12 @@ _jumbleOnConflictExpr(JumbleState *jstate, Node *node)
 }
 
 static void
-_jumbleForPortionOfExpr(JumbleState *jstate, Node *node)
-{
-	ForPortionOfExpr *expr = (ForPortionOfExpr *) node;
-
-	JUMBLE_NODE(rangeVar);
-	JUMBLE_STRING(range_name);
-	JUMBLE_NODE(targetFrom);
-	JUMBLE_NODE(targetTo);
-	JUMBLE_NODE(targetRange);
-	JUMBLE_FIELD(rangeType);
-	JUMBLE_FIELD(isDomain);
-	JUMBLE_NODE(overlapsExpr);
-	JUMBLE_NODE(rangeTargetList);
-	JUMBLE_FIELD(withoutPortionProc);
-}
-
-static void
 _jumbleQuery(JumbleState *jstate, Node *node)
 {
 	Query *expr = (Query *) node;
 
 	JUMBLE_FIELD(commandType);
 	JUMBLE_NODE(utilityStmt);
-	JUMBLE_NODE(forPortionOf);
 	JUMBLE_NODE(cteList);
 	JUMBLE_NODE(rtable);
 	JUMBLE_NODE(jointree);
@@ -743,7 +706,6 @@ _jumbleQuery(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(returningList);
 	JUMBLE_NODE(groupClause);
 	JUMBLE_FIELD(groupDistinct);
-	JUMBLE_FIELD(groupByAll);
 	JUMBLE_NODE(groupingSets);
 	JUMBLE_NODE(havingQual);
 	JUMBLE_NODE(windowClause);
@@ -972,17 +934,6 @@ _jumbleRangeTableFuncCol(JumbleState *jstate, Node *node)
 }
 
 static void
-_jumbleRangeGraphTable(JumbleState *jstate, Node *node)
-{
-	RangeGraphTable *expr = (RangeGraphTable *) node;
-
-	JUMBLE_NODE(graph_name);
-	JUMBLE_NODE(graph_pattern);
-	JUMBLE_NODE(columns);
-	JUMBLE_NODE(alias);
-}
-
-static void
 _jumbleRangeTableSample(JumbleState *jstate, Node *node)
 {
 	RangeTableSample *expr = (RangeTableSample *) node;
@@ -1119,45 +1070,13 @@ _jumblePartitionRangeDatum(JumbleState *jstate, Node *node)
 }
 
 static void
-_jumbleSinglePartitionSpec(JumbleState *jstate, Node *node)
-{
-	SinglePartitionSpec *expr = (SinglePartitionSpec *) node;
-
-	JUMBLE_NODE(name);
-	JUMBLE_NODE(bound);
-}
-
-static void
 _jumblePartitionCmd(JumbleState *jstate, Node *node)
 {
 	PartitionCmd *expr = (PartitionCmd *) node;
 
 	JUMBLE_NODE(name);
 	JUMBLE_NODE(bound);
-	JUMBLE_NODE(partlist);
 	JUMBLE_FIELD(concurrent);
-}
-
-static void
-_jumbleGraphPattern(JumbleState *jstate, Node *node)
-{
-	GraphPattern *expr = (GraphPattern *) node;
-
-	JUMBLE_NODE(path_pattern_list);
-	JUMBLE_NODE(whereClause);
-}
-
-static void
-_jumbleGraphElementPattern(JumbleState *jstate, Node *node)
-{
-	GraphElementPattern *expr = (GraphElementPattern *) node;
-
-	JUMBLE_FIELD(kind);
-	JUMBLE_STRING(variable);
-	JUMBLE_NODE(labelexpr);
-	JUMBLE_NODE(subexpr);
-	JUMBLE_NODE(whereClause);
-	JUMBLE_NODE(quantifier);
 }
 
 static void
@@ -1174,8 +1093,6 @@ _jumbleRangeTblEntry(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(functions);
 	JUMBLE_FIELD(funcordinality);
 	JUMBLE_NODE(tablefunc);
-	JUMBLE_NODE(graph_pattern);
-	JUMBLE_NODE(graph_table_columns);
 	JUMBLE_NODE(values_lists);
 	JUMBLE_STRING(ctename);
 	JUMBLE_FIELD(ctelevelsup);
@@ -1269,17 +1186,6 @@ _jumbleRowMarkClause(JumbleState *jstate, Node *node)
 	JUMBLE_FIELD(strength);
 	JUMBLE_FIELD(waitPolicy);
 	JUMBLE_FIELD(pushedDown);
-}
-
-static void
-_jumbleForPortionOfClause(JumbleState *jstate, Node *node)
-{
-	ForPortionOfClause *expr = (ForPortionOfClause *) node;
-
-	JUMBLE_STRING(range_name);
-	JUMBLE_NODE(target);
-	JUMBLE_NODE(target_start);
-	JUMBLE_NODE(target_end);
 }
 
 static void
@@ -1590,7 +1496,6 @@ _jumbleDeleteStmt(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(whereClause);
 	JUMBLE_NODE(returningClause);
 	JUMBLE_NODE(withClause);
-	JUMBLE_NODE(forPortionOf);
 }
 
 static void
@@ -1604,7 +1509,6 @@ _jumbleUpdateStmt(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(fromClause);
 	JUMBLE_NODE(returningClause);
 	JUMBLE_NODE(withClause);
-	JUMBLE_NODE(forPortionOf);
 }
 
 static void
@@ -1632,7 +1536,6 @@ _jumbleSelectStmt(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(whereClause);
 	JUMBLE_NODE(groupClause);
 	JUMBLE_FIELD(groupDistinct);
-	JUMBLE_FIELD(groupByAll);
 	JUMBLE_NODE(havingClause);
 	JUMBLE_NODE(windowClause);
 	JUMBLE_NODE(valuesLists);
@@ -2425,6 +2328,7 @@ _jumbleCreateStatsStmt(JumbleState *jstate, Node *node)
 	JUMBLE_STRING(stxcomment);
 	JUMBLE_FIELD(transformed);
 	JUMBLE_FIELD(if_not_exists);
+	JUMBLE_FIELD(owner);
 }
 
 static void
@@ -2864,81 +2768,6 @@ _jumbleCreateCastStmt(JumbleState *jstate, Node *node)
 }
 
 static void
-_jumbleCreatePropGraphStmt(JumbleState *jstate, Node *node)
-{
-	CreatePropGraphStmt *expr = (CreatePropGraphStmt *) node;
-
-	JUMBLE_NODE(pgname);
-	JUMBLE_NODE(vertex_tables);
-	JUMBLE_NODE(edge_tables);
-}
-
-static void
-_jumblePropGraphVertex(JumbleState *jstate, Node *node)
-{
-	PropGraphVertex *expr = (PropGraphVertex *) node;
-
-	JUMBLE_NODE(vtable);
-	JUMBLE_NODE(vkey);
-	JUMBLE_NODE(labels);
-}
-
-static void
-_jumblePropGraphEdge(JumbleState *jstate, Node *node)
-{
-	PropGraphEdge *expr = (PropGraphEdge *) node;
-
-	JUMBLE_NODE(etable);
-	JUMBLE_NODE(ekey);
-	JUMBLE_NODE(esrckey);
-	JUMBLE_STRING(esrcvertex);
-	JUMBLE_NODE(esrcvertexcols);
-	JUMBLE_NODE(edestkey);
-	JUMBLE_STRING(edestvertex);
-	JUMBLE_NODE(edestvertexcols);
-	JUMBLE_NODE(labels);
-}
-
-static void
-_jumblePropGraphLabelAndProperties(JumbleState *jstate, Node *node)
-{
-	PropGraphLabelAndProperties *expr = (PropGraphLabelAndProperties *) node;
-
-	JUMBLE_STRING(label);
-	JUMBLE_NODE(properties);
-}
-
-static void
-_jumblePropGraphProperties(JumbleState *jstate, Node *node)
-{
-	PropGraphProperties *expr = (PropGraphProperties *) node;
-
-	JUMBLE_NODE(properties);
-	JUMBLE_FIELD(all);
-}
-
-static void
-_jumbleAlterPropGraphStmt(JumbleState *jstate, Node *node)
-{
-	AlterPropGraphStmt *expr = (AlterPropGraphStmt *) node;
-
-	JUMBLE_NODE(pgname);
-	JUMBLE_FIELD(missing_ok);
-	JUMBLE_NODE(add_vertex_tables);
-	JUMBLE_NODE(add_edge_tables);
-	JUMBLE_NODE(drop_vertex_tables);
-	JUMBLE_NODE(drop_edge_tables);
-	JUMBLE_FIELD(drop_behavior);
-	JUMBLE_FIELD(element_kind);
-	JUMBLE_STRING(element_alias);
-	JUMBLE_NODE(add_labels);
-	JUMBLE_STRING(drop_label);
-	JUMBLE_STRING(alter_label);
-	JUMBLE_NODE(add_properties);
-	JUMBLE_NODE(drop_properties);
-}
-
-static void
 _jumbleCreateTransformStmt(JumbleState *jstate, Node *node)
 {
 	CreateTransformStmt *expr = (CreateTransformStmt *) node;
@@ -3114,8 +2943,8 @@ _jumbleWaitStmt(JumbleState *jstate, Node *node)
 {
 	WaitStmt *expr = (WaitStmt *) node;
 
-	JUMBLE_STRING(lsn_literal);
 	JUMBLE_NODE(options);
+	JUMBLE_LOCATION(lsn_location);
 }
 
 static void
@@ -3190,7 +3019,6 @@ _jumbleModifyTable(JumbleState *jstate, Node *node)
 	JUMBLE_NODE(onConflictSet);
 	JUMBLE_NODE(onConflictCols);
 	JUMBLE_NODE(onConflictWhere);
-	JUMBLE_NODE(forPortionOf);
 	JUMBLE_FIELD(exclRelRTI);
 	JUMBLE_NODE(exclRelTlist);
 	JUMBLE_NODE(mergeActionLists);
