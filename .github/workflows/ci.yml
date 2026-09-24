@@ -22,7 +22,7 @@ jobs:
           - pg: 17
           - pg: 18
           - pg: 19
-            branch: master
+            branch: REL_19_STABLE
 
     steps:
       - name: Check out code
