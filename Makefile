@@ -7,7 +7,7 @@ OBJS = \
 	jumblefuncs.o
 
 EXTENSION = pg_stat_plans
-DATA = pg_stat_plans--2.0.sql pg_stat_plans--2.0--2.1.sql
+DATA = pg_stat_plans--2.0.sql pg_stat_plans--2.0--2.1.sql pg_stat_plans--2.1--2.2.sql
 PGFILEDESC = "pg_stat_plans - track per-plan call counts, execution times and EXPLAIN texts"
 
 LDFLAGS_SL += $(filter -lm, $(LIBS))

@@ -183,6 +183,10 @@ typedef struct PgStat_StatPlanEntry
 {
 	PgStat_Counter exec_count;
 	double		exec_time;
+	double		min_exec_time;	/* Minimum execution time for this plan */
+	double		max_exec_time;	/* Maximum execution time for this plan */
+	TimestampTz plan_first_used;	/* Timestamp when this plan was first executed */
+	TimestampTz plan_last_used;	/* Timestamp of the most recent execution */
 	double		usage;			/* Usage factor of the entry, used to
 								 * prioritize which plans to age out */
 
@@ -253,6 +257,38 @@ plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 
 	if (!pgstat_custom_lock_entry(entry_ref, nowait))
 		return false;
+
+	/*
+	 * Only merge min/max if localent has real executions
+	 * (localent->exec_count > 0)
+	 */
+	if (localent->exec_count > 0)
+	{
+		if (shfuncent->stats.exec_count == 0)
+		{
+			shfuncent->stats.min_exec_time = localent->min_exec_time;
+			shfuncent->stats.max_exec_time = localent->max_exec_time;
+			shfuncent->stats.plan_first_used = localent->plan_first_used;
+			shfuncent->stats.plan_last_used = localent->plan_last_used;
+		}
+		else
+		{
+			if (localent->min_exec_time < shfuncent->stats.min_exec_time)
+				shfuncent->stats.min_exec_time = localent->min_exec_time;
+			if (localent->max_exec_time > shfuncent->stats.max_exec_time)
+				shfuncent->stats.max_exec_time = localent->max_exec_time;
+
+			/*
+			 * Take the max/min rather than blindly overwriting, since flushes
+			 * from different backends aren't guaranteed to arrive in
+			 * strict chronological order.
+			 */
+			if (localent->plan_last_used > shfuncent->stats.plan_last_used)
+				shfuncent->stats.plan_last_used = localent->plan_last_used;
+			else if (localent->plan_first_used < shfuncent->stats.plan_first_used)
+				shfuncent->stats.plan_first_used = localent->plan_first_used;
+		}
+	}
 
 	shfuncent->stats.exec_count += localent->exec_count;
 	shfuncent->stats.exec_time += localent->exec_time;
@@ -972,6 +1008,32 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		}
 	}
 #endif
+
+	if (exec_count > 0)
+	{
+		TimestampTz now = GetCurrentTimestamp();
+
+		if (pending->exec_count == 0)
+		{
+			pending->min_exec_time = exec_time;
+			pending->max_exec_time = exec_time;
+			pending->plan_first_used = now;
+		}
+		else
+		{
+			if (exec_time < pending->min_exec_time)
+				pending->min_exec_time = exec_time;
+			if (exec_time > pending->max_exec_time)
+				pending->max_exec_time = exec_time;
+		}
+
+		/*
+		 * Always advance plan_last_used: within one backend, executions are
+		 * processed strictly in order, so each call here is chronologically
+		 * later than the last.
+		 */
+		pending->plan_last_used = now;
+	}
 
 	pending->exec_count += exec_count;
 	pending->exec_time += exec_time;
@@ -1780,7 +1842,7 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 Datum
 pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_PLANS_COLS 9
+#define PG_STAT_PLANS_COLS 13
 	bool		showplan = PG_GETARG_BOOL(0);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Oid			userid = GetUserId();
@@ -1841,6 +1903,21 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		}
 		values[i++] = Int64GetDatumFast(statent->exec_count);
 		values[i++] = Float8GetDatumFast(statent->exec_time);
+
+		if (statent->exec_count > 0)
+		{
+			values[i++] = Float8GetDatumFast(statent->min_exec_time);
+			values[i++] = Float8GetDatumFast(statent->max_exec_time);
+			values[i++] = TimestampTzGetDatum(statent->plan_first_used);
+			values[i++] = TimestampTzGetDatum(statent->plan_last_used);
+		}
+		else
+		{
+			nulls[i++] = true;
+			nulls[i++] = true;
+			nulls[i++] = true;
+			nulls[i++] = true;
+		}
 
 		if (showplan && (is_allowed_role || statent->info.userid == userid))
 		{
