@@ -1810,7 +1810,9 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
+		PgStatShared_Common *header;
 		PgStat_StatPlanEntry *statent;
+		PgStat_StatPlanEntry snap;
 		Datum		values[PG_STAT_PLANS_COLS];
 		bool		nulls[PG_STAT_PLANS_COLS];
 		int			i = 0;
@@ -1821,15 +1823,34 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
 
-		statent = pgstat_custom_get_entry_data(p->key.kind, dsa_get_address(pgStatCustomLocal.dsa, p->body));
+		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
+		statent = pgstat_custom_get_entry_data(p->key.kind, header);
 
-		values[i++] = ObjectIdGetDatum(statent->info.userid);
+		/*
+		 * Copy the entry out under its lock before reading any field.  The
+		 * dshash partition lock we hold (shared) only protects the hash table
+		 * structure and keeps the entry from being dropped; the flush path
+		 * (plan_stats_flush_cb) updates the counters under the per-entry lock
+		 * without taking the partition lock, so reading the live entry lets a
+		 * concurrent flush land between our field loads: a row whose columns
+		 * come from different moments. Same approach as pgstat_build_snapshot().
+		 *
+		 * The plan text and advice are read after releasing the entry lock.
+		 * That is safe because they are only freed by pgsp_dealloc_entries()
+		 * under an exclusive partition lock, which our shared seq-scan lock
+		 * excludes for the partition being iterated.
+		 */
+		LWLockAcquire(&header->lock, LW_SHARED);
+		snap = *statent;
+		LWLockRelease(&header->lock);
+
+		values[i++] = ObjectIdGetDatum(snap.info.userid);
 		values[i++] = ObjectIdGetDatum(p->key.dboid);
-		values[i++] = BoolGetDatum(statent->info.toplevel);
-		if (is_allowed_role || statent->info.userid == userid)
+		values[i++] = BoolGetDatum(snap.info.toplevel);
+		if (is_allowed_role || snap.info.userid == userid)
 		{
-			int64		queryid = statent->info.queryid;
-			int64		planid = statent->info.planid;
+			int64		queryid = snap.info.queryid;
+			int64		planid = snap.info.planid;
 
 			values[i++] = Int64GetDatumFast(queryid);
 			values[i++] = Int64GetDatumFast(planid);
@@ -1839,17 +1860,17 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 			nulls[i++] = true;
 			nulls[i++] = true;
 		}
-		values[i++] = Int64GetDatumFast(statent->exec_count);
-		values[i++] = Float8GetDatumFast(statent->exec_time);
+		values[i++] = Int64GetDatumFast(snap.exec_count);
+		values[i++] = Float8GetDatumFast(snap.exec_time);
 
-		if (showplan && (is_allowed_role || statent->info.userid == userid))
+		if (showplan && (is_allowed_role || snap.info.userid == userid))
 		{
-			char	   *pstr = DsaPointerIsValid(statent->info.plan_text) ? dsa_get_address(pgsp_plan_dsa, statent->info.plan_text) : NULL;
+			char	   *pstr = DsaPointerIsValid(snap.info.plan_text) ? dsa_get_address(pgsp_plan_dsa, snap.info.plan_text) : NULL;
 
 			if (pstr)
 			{
-				char	   *dec_pstr = pgsp_decompress_plan_text(pstr, statent->info.plan_text_size, statent->info.plan_text_compression);
-				char	   *enc = pg_any_to_server(dec_pstr, strlen(dec_pstr), statent->info.plan_encoding);
+				char	   *dec_pstr = pgsp_decompress_plan_text(pstr, snap.info.plan_text_size, snap.info.plan_text_compression);
+				char	   *enc = pg_any_to_server(dec_pstr, strlen(dec_pstr), snap.info.plan_encoding);
 
 				values[i++] = CStringGetTextDatum(enc);
 
@@ -1873,10 +1894,10 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 
 		/* plan_advice (Postgres 19+; always NULL otherwise) */
 #if PG_VERSION_NUM >= 190000
-		if (showplan && (is_allowed_role || statent->info.userid == userid) &&
-			DsaPointerIsValid(statent->info.plan_advice))
+		if (showplan && (is_allowed_role || snap.info.userid == userid) &&
+			DsaPointerIsValid(snap.info.plan_advice))
 		{
-			char	   *astr = dsa_get_address(pgsp_plan_dsa, statent->info.plan_advice);
+			char	   *astr = dsa_get_address(pgsp_plan_dsa, snap.info.plan_advice);
 
 			values[i++] = CStringGetTextDatum(astr);
 		}
