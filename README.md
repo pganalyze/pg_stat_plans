@@ -18,7 +18,32 @@ Uses pluggable cumulative statistics ([7949d95945](https://git.postgresql.org/gi
 
 ## Installation
 
+### Installing from PGDG packages
+
+`pg_stat_plans` is packaged in the official PostgreSQL Global Development Group (PGDG) repositories,
+so if you installed Postgres from [apt.postgresql.org](https://wiki.postgresql.org/wiki/Apt) or
+[yum.postgresql.org](https://yum.postgresql.org/), you can install the extension with your package
+manager. Replace `18` with your Postgres major version.
+
+Debian / Ubuntu:
+
+```
+sudo apt install postgresql-18-pg-stat-plans
+```
+
+RHEL / Rocky / AlmaLinux / Fedora:
+
+```
+sudo dnf install pg_stat_plans_18
+```
+
+The PGDG packages are built with `zstd` support.
+
+### Installing from source
+
 You can use `make install` to build and install the extension. This requires having a `pg_config` in your path that references a Postgres 16 or newer installation. You can optionally build with `zstd` support for compressing plan texts in shared memory.
+
+### Enabling the extension
 
 After installing, make sure that your Postgres server loads the shared library:
 
@@ -30,6 +55,60 @@ pg_stat_plans.compress = 'zstd'
 ```
 
 Whilst `pg_stat_statements` is not directly required to use `pg_stat_plans`, you will likely want that in practice to make effective use of this extension.
+
+### Installing on Kubernetes with CloudNativePG
+
+`pg_stat_plans` is available as a pre-built extension image from the community
+[CNPG Extensions](https://github.com/cnpg-extensions/postgres-extensions-containers) project, which
+can be mounted into a [CloudNativePG](https://cloudnative-pg.io) cluster using
+[image volume extensions](https://cloudnative-pg.io/documentation/current/imagevolume_extensions/).
+This requires CloudNativePG 1.27 or newer, Postgres 18 or newer, and Kubernetes 1.33 or newer with the
+`ImageVolume` feature gate enabled.
+
+Add the extension image to your `Cluster` and preload the shared library:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: cluster-pg-stat-plans
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18-minimal-trixie
+  storage:
+    size: 1Gi
+  postgresql:
+    shared_preload_libraries:
+    - pg_stat_plans
+    extensions:
+    - name: pg-stat-plans
+      image:
+        reference: ghcr.io/cnpg-extensions/pg-stat-plans:2.1.1-18-trixie
+```
+
+Then create the extension in the database you want to query it from, either with a `Database` resource:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: cluster-pg-stat-plans-app
+spec:
+  name: app
+  owner: app
+  cluster:
+    name: cluster-pg-stat-plans
+  extensions:
+  - name: pg_stat_plans
+    version: '2.1'
+```
+
+or by running `CREATE EXTENSION pg_stat_plans;` manually.
+
+Image tags follow the pattern `<version>-<pg_major>-<distro>`, so pick the tag matching your base
+image's Postgres major version and Debian release (e.g. `2.1.1-18-bookworm` for a `bookworm` base
+image). See the [pg-stat-plans image README](https://github.com/cnpg-extensions/postgres-extensions-containers/tree/main/pg-stat-plans)
+for details.
 
 ## Usage
 
