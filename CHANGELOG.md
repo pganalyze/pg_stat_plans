@@ -12,9 +12,13 @@
     slack that Postgres reserves for other shared memory users
 * Postgres 16/17: Fix invalid memory access when reporting a double drop of a
   stats entry
-* Postgres 16/17: Fix crash after a failed stats entry allocation
-  - Ports the upstream fixes for a partially initialized local entry
-    reference being left behind when shared memory allocation fails
+* Postgres 16/17: Fix crashes after a failed stats entry allocation
+  - Ports the upstream fixes for a partially initialized entry being left
+    behind when shared memory allocation fails, both in the backend-local
+    reference cache and in the shared hash table
+* Postgres 16/17: Fix cleanup of stats entries that were reused and dropped
+  again while another backend still held a reference
+  - Ports the upstream fix to pgstat_release_entry_ref
 
 ## 2.1.1   2026-09-23
 
