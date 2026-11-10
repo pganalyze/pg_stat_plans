@@ -217,6 +217,17 @@ static const PgStat_KindInfo plan_stats = {
 	 */
 	.accessed_across_databases = true,
 
+#if PG_VERSION_NUM >= 200000
+	/*
+	 * Keep plan entries in a dedicated hash table (and DSA), instead of the
+	 * shared stats hash table. There can be many plan entries, and we scan
+	 * them when reading pg_stat_plans and when deallocating entries, so this
+	 * avoids those scans having to walk (and lock partitions of) the entries
+	 * of all other stats kinds, and vice versa.
+	 */
+	.own_hash = true,
+#endif
+
 	.shared_size = sizeof(PgStatShared_Plan),
 	.shared_data_off = offsetof(PgStatShared_Plan, stats),
 	.shared_data_len = sizeof(((PgStatShared_Plan *) 0)->stats),
