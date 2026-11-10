@@ -2,23 +2,27 @@
 
 ## Unreleased
 
-* Postgres 16/17: Fix crash in processes that are not regular client backends (#31)
-  - The stats machinery was only attached in the client authentication hook,
-    which background workers, parallel workers, autovacuum workers and
-    single-user mode never run. Any such process that ran a tracked query, or
-    read pg_stat_plans, crashed the server. It is now attached on first use.
-* Postgres 16/17: Request the shared memory used for the stats hash table
-  - About 280kB were allocated without being requested, taking from the
-    slack that Postgres reserves for other shared memory users
-* Postgres 16/17: Fix invalid memory access when reporting a double drop of a
-  stats entry
-* Postgres 16/17: Fix crashes after a failed stats entry allocation
-  - Ports the upstream fixes for a partially initialized entry being left
-    behind when shared memory allocation fails, both in the backend-local
-    reference cache and in the shared hash table
-* Postgres 16/17: Fix cleanup of stats entries that were reused and dropped
-  again while another backend still held a reference
-  - Ports the upstream fix to pgstat_release_entry_ref
+* Postgres 16/17 compatibility layer
+  - Fix crash in processes that are not regular client backends (#31)
+    - The stats machinery was only attached in the client authentication
+      hook, which background workers, parallel workers, autovacuum workers
+      and single-user mode never run. Any such process that ran a tracked
+      query, or read pg_stat_plans, crashed the server. Instead, attach
+      on first use.
+  - Fix request of shared memory used for the stats hash table
+  - Fix invalid memory access when reporting a double drop of a stats entry
+  - Fix crashes after a failed stats entry allocation
+    - Ports the upstream fixes for a partially initialized entry being left
+      behind when shared memory allocation fails, both in the backend-local
+      reference cache
+      ([4069df21be](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=4069df21beb838e75e8639c47e6a9c800e3c8af5),
+      [fc29deb521](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=fc29deb52106e710e9eba4d0f59ee185c8d200bf))
+      and in the shared hash table
+      ([d9de60c5e4](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=d9de60c5e47a7f7a5dcee050d119bda08ea85d55))
+  - Fix cleanup of stats entries that were reused and dropped again while
+    another backend still held a reference
+    - Ports the upstream fix to pgstat_release_entry_ref
+      ([e9d0600aba](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=e9d0600aba5467b352eb67aaf6ad92a9a4776b0a))
 
 ## 2.1.1   2026-09-23
 
