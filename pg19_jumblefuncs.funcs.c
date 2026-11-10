@@ -3827,6 +3827,7 @@ _jumbleElidedNode(JumbleState *jstate, Node *node)
 	JUMBLE_FIELD(plan_node_id);
 	JUMBLE_FIELD(elided_type);
 	JUMBLE_BITMAPSET(relids);
+	JUMBLE_NODE(child_append_relid_sets);
 }
 
 static void

@@ -306,11 +306,11 @@ pgstat_free_entry(PgStatShared_HashEntry *shent, dshash_seq_status *hstat)
 	pdsa = shent->body;
 
 	if (!hstat)
-		dshash_delete_entry(pgStatCustomLocal.shared_hash, shent);
+		dshash_delete_entry(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), shent);
 	else
 		dshash_delete_current(hstat);
 
-	dsa_free(pgStatCustomLocal.dsa, pdsa);
+	dsa_free(pgstat_custom_dsa(PGSTAT_KIND_PLANS), pdsa);
 
 #if PG_VERSION_NUM >= 190000
 	/* Decrement entry count, if required. */
@@ -353,7 +353,7 @@ pgsp_dealloc_entries(void)
 	int			nvictims;
 
 	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStatShared_Common *header;
@@ -363,7 +363,7 @@ pgsp_dealloc_entries(void)
 		if (p->dropped || p->key.kind != PGSTAT_KIND_PLANS)
 			continue;
 
-		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
+		header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
 
 		if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
 			continue;
@@ -399,11 +399,11 @@ pgsp_dealloc_entries(void)
 		 * resurrection of the entry by pgstat_reinit_entry() could cause a leak,
 		 * since reinit does a memset and through that zeroes our DSA pointers.
 		 */
-		p = dshash_find(pgStatCustomLocal.shared_hash, &entry->key, true);
+		p = dshash_find(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), &entry->key, true);
 		if (p != NULL)
 		{
 			PgStatShared_Common *header =
-				dsa_get_address(pgStatCustomLocal.dsa, p->body);
+				dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
 			PgStat_StatPlanEntry *statent =
 				(PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
@@ -420,7 +420,7 @@ pgsp_dealloc_entries(void)
 			}
 			LWLockRelease(&header->lock);
 
-			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
+			dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
 		}
 
 #if PG_VERSION_NUM >= 190000
@@ -466,7 +466,7 @@ pgsp_dealloc_release(void)
 	 * skip it now and reclaim it on a later pass, once
 	 * pgstat_request_entry_refs_gc() has nudged that backend to let go.
 	 */
-	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStat_HashKey *key;
@@ -494,7 +494,7 @@ pgsp_dealloc_release(void)
 		PgStatShared_Common *header;
 		PgStat_StatPlanEntry *statent;
 
-		p = dshash_find(pgStatCustomLocal.shared_hash, key, true);
+		p = dshash_find(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), key, true);
 		if (p == NULL)
 			continue;			/* already reclaimed by another backend */
 
@@ -502,11 +502,11 @@ pgsp_dealloc_release(void)
 			pg_atomic_read_u32(&p->refcount) != 1)
 		{
 			/* referenced again or resurrected since phase 1 -- leave it */
-			dshash_release_lock(pgStatCustomLocal.shared_hash, p);
+			dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
 			continue;
 		}
 
-		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
+		header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
 		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
 		/*
@@ -1777,7 +1777,11 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 	if (!pgsp_attach_shmem())
 		PG_RETURN_VOID();
 
+#if PG_VERSION_NUM >= 200000
+	pgstat_custom_drop_matching_entries(PGSTAT_KIND_PLANS, match_plans_entries, 0);
+#else
 	pgstat_custom_drop_matching_entries(match_plans_entries, 0);
+#endif
 
 	/* Free plan text memory and allow cleanup of dropped entries */
 	pgsp_dealloc_release();
@@ -1819,7 +1823,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		return (Datum) 0;
 
 	/* dshash entry is not modified, take shared lock */
-	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
+	dshash_seq_init(&hstat, pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
 	{
 		PgStatShared_Common *header;
@@ -1835,7 +1839,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
 
-		header = dsa_get_address(pgStatCustomLocal.dsa, p->body);
+		header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
 		statent = pgstat_custom_get_entry_data(p->key.kind, header);
 
 		/*

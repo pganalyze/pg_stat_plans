@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+* Postgres 20 support (in development, tested against the master branch)
+  - Add plan jumble funcs for Postgres 20
+  - Adapt to per-kind stats hash tables and DSA areas in pgstats
+  - Adapt to pg_attribute_always_inline being removed in favor of pg_always_inline
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication

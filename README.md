@@ -276,6 +276,7 @@ The source branches that are used for this extraction can be found here:
 | 17 | [pg-stat-plans-17](https://github.com/lfittl/postgres/tree/pg-stat-plans-17) |
 | 18 | [pg-stat-plans-18](https://github.com/lfittl/postgres/tree/pg-stat-plans-18) |
 | 19 | [pg-stat-plans-19](https://github.com/lfittl/postgres/tree/pg-stat-plans-19) |
+| 20 | [pg-stat-plans-20](https://github.com/lfittl/postgres/tree/pg-stat-plans-20) |
 
 The principles behind which fields are jumbled are [documented in the Postgres wiki](https://wiki.postgresql.org/wiki/Plan_ID_Jumbling).
 

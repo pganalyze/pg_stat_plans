@@ -38,7 +38,7 @@ endif
 # present, preload both modules for the whole run; the extra module is inert
 # while pg_stat_plans.plan_advice is "off" (the default), so the other tests
 # are unaffected.
-ifneq (,$(findstring PostgreSQL 19,$(shell $(PG_CONFIG) --version)))
+ifneq (,$(filter 19% 20%,$(word 2,$(shell $(PG_CONFIG) --version))))
 	PLAN_ADVICE_LIB := $(wildcard $(shell $(PG_CONFIG) --pkglibdir)/pg_plan_advice.*)
 	ifneq (,$(PLAN_ADVICE_LIB))
 		REGRESS_OPTS = --temp-config $(srcdir)/pg_plan_advice.conf
