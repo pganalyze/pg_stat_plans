@@ -21,8 +21,12 @@ jobs:
           - pg: 16
           - pg: 17
           - pg: 18
+          # Pre-release packages (beta/RC) are published in a separate
+          # per-version component of the PGDG apt repository
           - pg: 19
-            branch: REL_19_STABLE
+            pgdg_prerelease: true
+          - pg: 20
+            branch: master
 
     steps:
       - name: Check out code
@@ -38,7 +42,8 @@ jobs:
         if: ${{ !matrix.branch }}
         run: |
           sudo apt-get install -y --no-install-recommends postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+            ${{ matrix.pgdg_prerelease && format('-v {0}', matrix.pg) || '' }}
           sudo apt-get install -y --no-install-recommends \
             postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
           echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> "$GITHUB_ENV"

@@ -82,5 +82,18 @@ pgstat_custom_get_entry_data(PgStat_Kind kind, PgStatShared_Common *entry)
 
 #endif
 
+/*
+ * Postgres 20 allows a stats kind to use its own hash table and DSA, so the
+ * backend-local state tracks these per kind.
+ */
+#if PG_VERSION_NUM >= 200000
+#define pgstat_custom_shared_hash(kind) (pgStatLocal.kind_hash[(kind)])
+#define pgstat_custom_dsa(kind) (pgStatLocal.kind_dsa[(kind)])
+#else
+#define pgstat_custom_shared_hash(kind) (pgStatCustomLocal.shared_hash)
+#define pgstat_custom_dsa(kind) (pgStatCustomLocal.dsa)
+#endif
+
+
 
 #endif							/* PGSTAT_CUSTOM_H */

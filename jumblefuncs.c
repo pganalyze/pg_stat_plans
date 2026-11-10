@@ -24,6 +24,11 @@
 
 #include "jumblefuncs.h"
 
+/* Newer Postgres versions renamed pg_attribute_always_inline to pg_always_inline */
+#ifndef pg_always_inline
+#define pg_always_inline pg_attribute_always_inline
+#endif
+
 #define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 static JumbleState *InitJumbleInternal(bool record_clocations);
@@ -123,7 +128,7 @@ HashJumbleState(JumbleState *jstate)
  *
  * Note: Callers must ensure that size > 0.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 					 Size size)
 {
@@ -206,7 +211,7 @@ AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
  * AppendJumbleNull
  *		For jumbling NULL pointers
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 AppendJumbleNull(JumbleState *jstate)
 {
 	jstate->pending_nulls++;
@@ -283,7 +288,7 @@ AppendJumble64(JumbleState *jstate, const unsigned char *value)
  *
  * Note: Callers must ensure that there's at least 1 pending NULL.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 FlushPendingNulls(JumbleState *jstate)
 {
 	Assert(jstate->pending_nulls > 0);
@@ -449,7 +454,9 @@ do { \
 		AppendJumble(jstate, (const unsigned char *) expr->item, sizeof(*(expr->item)) * len); \
 } while(0)
 
-#if PG_VERSION_NUM >= 190000
+#if PG_VERSION_NUM >= 200000
+#include "pg20_jumblefuncs.funcs.c"
+#elif PG_VERSION_NUM >= 190000
 #include "pg19_jumblefuncs.funcs.c"
 #elif PG_VERSION_NUM >= 180000
 #include "pg18_jumblefuncs.funcs.c"
@@ -538,7 +545,9 @@ JumbleNode(JumbleState *jstate, Node *node)
 
 	switch (nodeTag(expr))
 	{
-#if PG_VERSION_NUM >= 190000
+#if PG_VERSION_NUM >= 200000
+#include "pg20_jumblefuncs.switch.c"
+#elif PG_VERSION_NUM >= 190000
 #include "pg19_jumblefuncs.switch.c"
 #elif PG_VERSION_NUM >= 180000
 #include "pg18_jumblefuncs.switch.c"
