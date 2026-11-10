@@ -22,8 +22,6 @@
 #define pgstat_custom_register_kind pgstat_register_kind
 #define pgstat_custom_prep_pending_entry pgstat_prep_pending_entry
 
-#define pgstat_custom_drop_matching_entries pgstat_drop_matching_entries
-
 #else
 
 extern PGDLLIMPORT PgStat_LocalState pgStatCustomLocal;
@@ -34,7 +32,8 @@ extern void pgstat_custom_assert_is_up(void);
 #define pgstat_custom_assert_is_up() ((void)true)
 #endif
 
-extern void pgstat_custom_initialize(void);
+extern bool pgstat_custom_initialize(void);
+extern Size StatsCustomShmemSize(void);
 extern void StatsCustomShmemInit(void);
 extern void pgstat_custom_attach_shmem(void);
 extern void pgstat_custom_detach_shmem(void);
