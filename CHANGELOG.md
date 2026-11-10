@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+* Postgres 16/17: Fix crash in processes that are not regular client backends (#31)
+  - The stats machinery was only attached in the client authentication hook,
+    which background workers, parallel workers, autovacuum workers and
+    single-user mode never run. Any such process that ran a tracked query, or
+    read pg_stat_plans, crashed the server. It is now attached on first use.
+* Postgres 16/17: Request the shared memory used for the stats hash table
+  - About 280kB were allocated without being requested, taking from the
+    slack that Postgres reserves for other shared memory users
+* Postgres 16/17: Fix invalid memory access when reporting a double drop of a
+  stats entry
+* Postgres 16/17: Fix crash after a failed stats entry allocation
+  - Ports the upstream fixes for a partially initialized local entry
+    reference being left behind when shared memory allocation fails
+
 ## 2.1.1   2026-09-23
 
 * Remove experimental marker

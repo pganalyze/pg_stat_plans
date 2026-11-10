@@ -110,13 +110,16 @@ static bool pgStatCustomForceNextFlush = false;
 
 
 /*
- * For assertions that check pgstat is not used before initialization / after
- * shutdown.
+ * Tracks whether this process has attached to the custom stats shared memory,
+ * and whether it has already detached again at process exit.
+ *
+ * Unlike core (where these are assert-only), we need them in all builds: There
+ * is no hook that runs in every process type at startup before Postgres 18,
+ * so initialization happens lazily on first use, see
+ * pgstat_custom_initialize().
  */
-#ifdef USE_ASSERT_CHECKING
 static bool pgstat_custom_is_initialized = false;
 static bool pgstat_custom_is_shutdown = false;
-#endif
 
 /*
  * Information about custom statistics kinds.
@@ -172,21 +175,34 @@ pgstat_custom_shutdown_hook(int code, Datum arg)
 
 	pgstat_custom_detach_shmem();
 
-#ifdef USE_ASSERT_CHECKING
 	pgstat_custom_is_shutdown = true;
-#endif
 }
 
 /*
- * Initialize pgstats state, and set up our on-proc-exit hook. Called from
- * BaseInit().
+ * Initialize pgstats state on first use in this process, and set up our
+ * on-proc-exit hook.
  *
- * NOTE: MyDatabaseId isn't set yet; so the shutdown hook has to be careful.
+ * In core this is called from BaseInit(), but before Postgres 18 extensions
+ * have no hook that runs there, or anywhere else that all process types go
+ * through (e.g. ClientAuthentication_hook is skipped by background workers,
+ * parallel workers, autovacuum workers and standalone backends). Instead, all
+ * users of the custom stats machinery must call this before touching it. It
+ * is cheap to call repeatedly.
+ *
+ * Returns false if custom stats are not usable in this process, which is the
+ * case once our shutdown hook has run. Callbacks registered before ours run
+ * after it at process exit, and could still execute queries. Callers must then
+ * skip their stats work.
  */
-void
+bool
 pgstat_custom_initialize(void)
 {
-	Assert(!pgstat_custom_is_initialized);
+	if (likely(pgstat_custom_is_initialized))
+		return !pgstat_custom_is_shutdown;
+
+	/* stats kinds are only registered (and shmem set up) when preloaded */
+	if (pgStatCustomLocal.shmem == NULL)
+		elog(ERROR, "custom cumulative statistics shared memory is not initialized");
 
 	pgstat_custom_attach_shmem();
 
@@ -206,9 +222,9 @@ pgstat_custom_initialize(void)
 	/* Set up a process-exit hook to clean up */
 	before_shmem_exit(pgstat_custom_shutdown_hook, 0);
 
-#ifdef USE_ASSERT_CHECKING
 	pgstat_custom_is_initialized = true;
-#endif
+
+	return true;
 }
 
 /* ------------------------------------------------------------
@@ -244,7 +260,10 @@ pgstat_custom_report_stat(bool force)
 	TimestampTz now;
 	bool		nowait;
 
-	pgstat_custom_assert_is_up();
+	/* Nothing can be pending if we never attached, or already detached */
+	if (!pgstat_custom_is_initialized || pgstat_custom_is_shutdown)
+		return 0;
+
 	//Assert(!IsTransactionOrTransactionBlock());
 
 	/* "absorb" the forced flush even if there's nothing to flush */
@@ -703,8 +722,10 @@ pgstat_custom_dsa_init_size(void)
 
 /*
  * Compute shared memory space needed for cumulative statistics
+ *
+ * Must be passed to RequestAddinShmemSpace() from the shmem_request_hook.
  */
-static Size
+Size
 StatsCustomShmemSize(void)
 {
 	Size		sz;
@@ -1105,9 +1126,12 @@ pgstat_custom_get_entry_ref(PgStat_Kind kind, Oid dboid, Oid objid, bool create,
 			if (shheader == NULL)
 			{
 				/*
-				 * Failed the allocation of a new entry, so clean up the
-				 * shared hashtable before giving up.
+				 * Failed the allocation of a new entry, so clean up both the
+				 * local reference and the shared hashtable before giving up.
+				 * Clean the local state first, since releasing the dshash
+				 * lock can process a pending interrupt.
 				 */
+				pgstat_custom_release_entry_ref(key, entry_ref, false);
 				dshash_delete_entry(pgStatCustomLocal.shared_hash, shhashent);
 
 				ereport(ERROR,
@@ -1338,6 +1362,18 @@ pgstat_custom_gc_entry_refs(void)
 			   entry_ref->shared_stats->magic == 0xdeadbeef);
 
 		/*
+		 * A NULL shared_entry marks a partial reference, left behind if
+		 * pgstat_custom_get_entry_ref() errored out before filling it in.
+		 */
+		if (entry_ref->shared_entry == NULL)
+		{
+			Assert(entry_ref->shared_stats == NULL);
+			Assert(entry_ref->pending == NULL);
+			pgstat_custom_release_entry_ref(ent->key, entry_ref, false);
+			continue;
+		}
+
+		/*
 		 * "generation" checks for the case of entries being reinitialized,
 		 * and "dropped" for the case where these are..  dropped.
 		 */
@@ -1437,7 +1473,7 @@ pgstat_custom_drop_entry_internal(PgStatShared_HashEntry *shent,
 	if (shent->dropped)
 		elog(ERROR,
 			 "trying to drop stats entry already dropped: kind=%s dboid=%u objid=%u refcount=%u generation=%u",
-			 pgstat_get_kind_info(shent->key.kind)->name,
+			 pgstat_custom_get_kind_info(shent->key.kind)->name,
 			 shent->key.dboid,
 			 shent->key.objoid,
 			 pg_atomic_read_u32(&shent->refcount),
@@ -1508,7 +1544,7 @@ pgstat_custom_drop_database_and_contents(Oid dboid)
 	 * holders to run garbage collection of their cached pgStatShmLookupCache.
 	 */
 	if (not_freed_count > 0)
-		pgstat_request_entry_refs_gc();
+		pgstat_custom_request_entry_refs_gc();
 }
 
 /*

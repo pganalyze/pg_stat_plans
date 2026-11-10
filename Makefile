@@ -13,7 +13,7 @@ PGFILEDESC = "pg_stat_plans - track per-plan call counts, execution times and EX
 LDFLAGS_SL += $(filter -lm, $(LIBS))
 
 REGRESS_OPTS = --temp-config $(srcdir)/pg_stat_plans.conf
-REGRESS = select activity privileges cleanup
+REGRESS = select activity privileges parallel cleanup
 
 PG_CFLAGS = $(shell pkg-config --cflags libzstd) $(shell pkg-config --cflags openssl)
 PG_LDFLAGS = $(shell pkg-config --libs libzstd)
@@ -42,7 +42,7 @@ ifneq (,$(findstring PostgreSQL 19,$(shell $(PG_CONFIG) --version)))
 	PLAN_ADVICE_LIB := $(wildcard $(shell $(PG_CONFIG) --pkglibdir)/pg_plan_advice.*)
 	ifneq (,$(PLAN_ADVICE_LIB))
 		REGRESS_OPTS = --temp-config $(srcdir)/pg_plan_advice.conf
-		REGRESS = select activity privileges plan_advice cleanup
+		REGRESS = select activity privileges parallel plan_advice cleanup
 	endif
 endif
 

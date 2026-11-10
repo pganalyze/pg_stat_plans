@@ -26,7 +26,6 @@
 #include "common/hashfn.h"
 #include "funcapi.h"
 #include "lib/dshash.h"
-#include "libpq/auth.h"
 #include "mb/pg_wchar.h"
 #include "nodes/parsenodes.h"
 #include "nodes/queryjumble.h"
@@ -198,7 +197,7 @@ typedef struct PgStatShared_Plan
 
 static bool plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 static uint64 pgsp_calculate_plan_id(PlannedStmt *result);
-static void pgsp_attach_shmem(void);
+static bool pgsp_attach_shmem(void);
 
 static const PgStat_KindInfo plan_stats = {
 	.name = "plan_stats",
@@ -848,8 +847,12 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 	planId = pgsp_calculate_plan_id(queryDesc->plannedstmt);
 #endif
 
-	/* Make sure our shared state is attached before we touch the counter. */
-	pgsp_attach_shmem();
+	/*
+	 * Make sure our shared state is attached before we touch the counter. If
+	 * it's unavailable (process is exiting), there is nothing we can record.
+	 */
+	if (!pgsp_attach_shmem())
+		return;
 
 	/*
 	 * Run garbage collection if needed before creating a new entry. Doing it
@@ -1530,7 +1533,7 @@ pgsp_init_shmem(void *ptr)
  * registry creates the segment on first use and hands every backend the same
  * pointer.
  */
-static void
+static bool
 pgsp_attach_shmem(void)
 {
 	if (pgsp_shared == NULL)
@@ -1549,6 +1552,8 @@ pgsp_attach_shmem(void)
 	}
 
 	pgsp_attach_plan_dsa();
+
+	return true;
 }
 
 #else							/* PG_VERSION_NUM < 180000 */
@@ -1567,6 +1572,7 @@ pgsp_shmem_request(void)
 	if (prev_shmem_request_hook)
 		prev_shmem_request_hook();
 
+	RequestAddinShmemSpace(StatsCustomShmemSize());
 	RequestAddinShmemSpace(MAXALIGN(sizeof(pgspSharedState)));
 }
 
@@ -1597,22 +1603,25 @@ pgsp_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
-/* The startup hook set pgsp_shared; attach the (lazily created) plan DSA. */
-static void
+/*
+ * The startup hook set pgsp_shared; attach this process to the custom stats
+ * shared memory and the (lazily created) plan DSA.
+ *
+ * There is no hook before PG18 that runs at startup of every process type
+ * that can execute queries (background workers, parallel workers and
+ * autovacuum workers never reach ClientAuthentication_hook, for example), so
+ * this is done on first use instead. Returns false if this process has
+ * already detached from the stats system during exit.
+ */
+static bool
 pgsp_attach_shmem(void)
 {
+	if (!pgstat_custom_initialize())
+		return false;
+
 	pgsp_attach_plan_dsa();
-}
 
-static ClientAuthentication_hook_type prev_ClientAuthentication_hook = NULL;
-
-static void
-pgsp_ClientAuthentication_hook(Port *port, int status)
-{
-	if (prev_ClientAuthentication_hook)
-		prev_ClientAuthentication_hook(port, status);
-
-	pgstat_custom_initialize();
+	return true;
 }
 #endif
 
@@ -1741,8 +1750,6 @@ _PG_init(void)
 	shmem_request_hook = pgsp_shmem_request;
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgsp_shmem_startup;
-	prev_ClientAuthentication_hook = ClientAuthentication_hook;
-	ClientAuthentication_hook = pgsp_ClientAuthentication_hook;
 #endif
 
 	pgstat_custom_register_kind(PGSTAT_KIND_PLANS, &plan_stats);
@@ -1767,7 +1774,8 @@ pg_stat_plans_reset(PG_FUNCTION_ARGS)
 				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
 
 	/* Make sure our shared state is attached before gc updates the counter. */
-	pgsp_attach_shmem();
+	if (!pgsp_attach_shmem())
+		PG_RETURN_VOID();
 
 	pgstat_custom_drop_matching_entries(match_plans_entries, 0);
 
@@ -1801,10 +1809,14 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_stat_plans must be loaded via \"shared_preload_libraries\"")));
 
-	/* Ensure the plan-text DSA is attached before we read plan texts. */
-	pgsp_attach_shmem();
-
 	InitMaterializedSRF(fcinfo, 0);
+
+	/*
+	 * Ensure the stats hash and plan-text DSA are attached before we read
+	 * them. If they're unavailable (process is exiting), return no rows.
+	 */
+	if (!pgsp_attach_shmem())
+		return (Datum) 0;
 
 	/* dshash entry is not modified, take shared lock */
 	dshash_seq_init(&hstat, pgStatCustomLocal.shared_hash, false);
