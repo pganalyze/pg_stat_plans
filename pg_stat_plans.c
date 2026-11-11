@@ -176,6 +176,18 @@ typedef struct PgStatShared_PlanInfo
 								 * pg_plan_advice string (Postgres 19+),
 								 * InvalidDsaPointer if absent or the DSA was full */
 	size_t		plan_advice_size;	/* size of stored advice (incl. NUL) */
+
+	/*
+	 * Set once the creating backend has initialized the fields above and
+	 * taken pg_stat_plans' extra reference on the entry (see
+	 * pgstat_report_plan_stats). Until then the entry is not shown and must
+	 * not be dropped, neither by deallocation nor by a reset.
+	 *
+	 * This is what makes the reference counting in pgsp_dealloc_release()
+	 * sound: a dropped entry was always initialized when it got dropped, so it
+	 * carries our extra reference, and so does any later resurrection of it.
+	 */
+	bool		initialized;
 }			PgStatShared_PlanInfo;
 
 typedef struct PgStat_StatPlanEntry
@@ -380,6 +392,14 @@ pgsp_dealloc_entries(void)
 			continue;
 
 		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+
+		/* Leave alone entries their creating backend is still setting up */
+		if (!statent->info.initialized)
+		{
+			LWLockRelease(&header->lock);
+			continue;
+		}
+
 		statent->usage *= USAGE_DECREASE_FACTOR;
 
 		entry = palloc(sizeof(PlanDeallocEntry));
@@ -403,6 +423,30 @@ pgsp_dealloc_entries(void)
 	for_each_from(lc, entries, list_length(entries) - nvictims)
 	{
 		PlanDeallocEntry *entry = lfirst(lc);
+		PgStatShared_Common *header;
+		PgStat_StatPlanEntry *statent;
+
+		p = dshash_find(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), &entry->key, true);
+		if (p == NULL)
+			continue;
+
+		header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
+		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+
+		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+
+		/*
+		 * Since we built the victim list, the entry may have been dropped by
+		 * someone else (e.g. a reset), or even freed and created again, in
+		 * which case its creator may still be setting it up. Leave it alone
+		 * in both cases.
+		 */
+		if (p->dropped || !statent->info.initialized)
+		{
+			LWLockRelease(&header->lock);
+			dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
+			continue;
+		}
 
 		/*
 		 * Free the plan text (and any advice string) before dropping the entry.
@@ -410,37 +454,39 @@ pgsp_dealloc_entries(void)
 		 * resurrection of the entry by pgstat_reinit_entry() could cause a leak,
 		 * since reinit does a memset and through that zeroes our DSA pointers.
 		 */
-		p = dshash_find(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), &entry->key, true);
-		if (p != NULL)
+		if (DsaPointerIsValid(statent->info.plan_text))
 		{
-			PgStatShared_Common *header =
-				dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), p->body);
-			PgStat_StatPlanEntry *statent =
-				(PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+			dsa_free(pgsp_plan_dsa, statent->info.plan_text);
+			statent->info.plan_text = InvalidDsaPointer;
+		}
+		if (DsaPointerIsValid(statent->info.plan_advice))
+		{
+			dsa_free(pgsp_plan_dsa, statent->info.plan_advice);
+			statent->info.plan_advice = InvalidDsaPointer;
+		}
+		LWLockRelease(&header->lock);
 
-			LWLockAcquire(&header->lock, LW_EXCLUSIVE);
-			if (DsaPointerIsValid(statent->info.plan_text))
-			{
-				dsa_free(pgsp_plan_dsa, statent->info.plan_text);
-				statent->info.plan_text = InvalidDsaPointer;
-			}
-			if (DsaPointerIsValid(statent->info.plan_advice))
-			{
-				dsa_free(pgsp_plan_dsa, statent->info.plan_advice);
-				statent->info.plan_advice = InvalidDsaPointer;
-			}
-			LWLockRelease(&header->lock);
-
-			dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
+		/*
+		 * Mark the entry as dropped, and release the reference that marked it
+		 * as not dropped. This is what pgstat_drop_entry() does, but we do it
+		 * here directly, so that the checks above and the drop happen under the
+		 * same partition lock. Calling pgstat_drop_entry() after releasing the
+		 * lock could drop an entry that was freed and created again in between,
+		 * or raise an error for one that was dropped concurrently.
+		 *
+		 * The entry itself stays around, since it still has our extra
+		 * reference; pgsp_dealloc_release() frees it once all backends have let
+		 * go of theirs (possibly including our own cached one).
+		 */
+		p->dropped = true;
+		if (pg_atomic_sub_fetch_u32(&p->refcount, 1) == 0)
+		{
+			/* Not expected for an initialized entry, but don't leak it */
+			pgstat_free_entry(p, NULL);
+			continue;
 		}
 
-#if PG_VERSION_NUM >= 190000
-		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid, true);
-#elif PG_VERSION_NUM >= 180000
-		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objid);
-#else
-		pgstat_custom_drop_entry(entry->key.kind, entry->key.dboid, entry->key.objoid);
-#endif
+		dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
 	}
 
 	/*
@@ -473,6 +519,8 @@ pgsp_dealloc_release(void)
 	 * entry can gain no new references. If a backend still holds a reference we
 	 * skip it now and reclaim it on a later pass, once
 	 * pgstat_request_entry_refs_gc() has nudged that backend to let go.
+	 *
+	 * Whether the remaining reference really is ours is checked in phase 2.
 	 */
 	dshash_seq_init(&hstat, pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), false);
 	while ((p = dshash_seq_next(&hstat)) != NULL)
@@ -518,9 +566,28 @@ pgsp_dealloc_release(void)
 		statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
 		/*
+		 * A refcount of 1 only means the remaining reference is our extra one
+		 * if the creating backend got as far as taking it. Entries are never
+		 * dropped before that point, so this is not expected to trigger, but
+		 * freeing an entry its creator still references would be bad enough
+		 * to double check. The creator takes the extra reference and sets the
+		 * flag under the entry lock, so check under it.
+		 */
+		LWLockAcquire(&header->lock, LW_SHARED);
+		if (!statent->info.initialized ||
+			pg_atomic_read_u32(&p->refcount) != 1)
+		{
+			LWLockRelease(&header->lock);
+			dshash_release_lock(pgstat_custom_shared_hash(PGSTAT_KIND_PLANS), p);
+			continue;
+		}
+		LWLockRelease(&header->lock);
+
+		/*
 		 * Free the plan text (and any advice string), if still stored, from the
-		 * DSA. We don't need a header lock here since we hold the partition lock
-		 * exclusively and with refcount = 1 no backend holds a direct reference.
+		 * DSA. We don't need the header lock anymore since we hold the partition
+		 * lock exclusively, and the only reference left is ours, so no backend
+		 * holds a direct reference or can acquire one.
 		 */
 		if (DsaPointerIsValid(statent->info.plan_text))
 		{
@@ -880,18 +947,65 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 	if (newly_created)
 	{
-		char	   *plan = pgsp_explain_plan(queryDesc);
+		char	   *plan;
 		size_t		stored_plan_size = 0;
 		bool		stored_plan_truncated = false;
 		int			stored_plan_compression = 0;
-		char	   *stored_plan = pgsp_compress_plan_text(plan, &stored_plan_size, &stored_plan_truncated, &stored_plan_compression);
+		char	   *stored_plan;
+		dsa_pointer plan_dp;
 
+		/*
+		 * First, and before doing anything that could fail, identify the entry
+		 * and take our extra reference on it.
+		 *
+		 * The extra reference keeps pgstat from freeing the entry (and
+		 * orphaning its plan text) until pgsp_dealloc_release() reclaims it.
+		 * We do this for every new entry, even ones that end up without text,
+		 * so that we have an accurate total entry count, and
+		 * pgsp_dealloc_release() is solely responsible for final cleanup.
+		 *
+		 * The exception to this are resurrected entries, which can occur when
+		 * an entry was marked as dropped, but not actually removed yet. If a
+		 * dropped entry is attempted to be recreated, the old entry gets reset,
+		 * but the reference counts (including our extra one) are kept. We can
+		 * tell the two apart through the generation our reference was acquired
+		 * at, which is zero only if we inserted the entry ourselves.
+		 *
+		 * Until "initialized" is set under the entry lock, nobody drops the
+		 * entry (see pgsp_dealloc_entries and match_plans_entries). Otherwise
+		 * it could be dropped, and then reclaimed or resurrected, while the
+		 * only reference to it is our own rather than the extra one.
+		 */
 		(void) pgstat_custom_lock_entry(entry_ref, false);
 
 		shstatent->stats.info.planid = planId;
 		shstatent->stats.info.queryid = queryId;
 		shstatent->stats.info.userid = userid;
 		shstatent->stats.info.toplevel = toplevel;
+		shstatent->stats.info.plan_encoding = GetDatabaseEncoding();
+
+		/*
+		 * The plan text and advice fields start out zeroed, i.e. as
+		 * InvalidDsaPointer. Don't reset them here: another backend running
+		 * the same plan may already have stored its advice string.
+		 */
+
+		if (entry_ref->generation == 0)
+		{
+			pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
+			pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
+		}
+
+		shstatent->stats.info.initialized = true;
+
+		pgstat_custom_unlock_entry(entry_ref);
+
+		/*
+		 * Now generate the plan text. If this fails, the entry stays behind
+		 * without text, but otherwise consistent.
+		 */
+		plan = pgsp_explain_plan(queryDesc);
+		stored_plan = pgsp_compress_plan_text(plan, &stored_plan_size, &stored_plan_truncated, &stored_plan_compression);
 
 		/*
 		 * Store the plan text in our separate, size-limited DSA. If that DSA is
@@ -899,45 +1013,33 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		 * InvalidDsaPointer rather than erroring) -- the entry's counters are
 		 * still useful and the SRF renders a NULL plan.
 		 */
-		shstatent->stats.info.plan_text =
-			dsa_allocate_extended(pgsp_plan_dsa, stored_plan_size, DSA_ALLOC_NO_OOM);
-		if (DsaPointerIsValid(shstatent->stats.info.plan_text))
+		plan_dp = dsa_allocate_extended(pgsp_plan_dsa, stored_plan_size, DSA_ALLOC_NO_OOM);
+		if (DsaPointerIsValid(plan_dp))
 		{
-			memcpy(dsa_get_address(pgsp_plan_dsa, shstatent->stats.info.plan_text), stored_plan, stored_plan_size);
-			shstatent->stats.info.plan_text_size = stored_plan_size;
-			shstatent->stats.info.plan_text_truncated = stored_plan_truncated;
-			shstatent->stats.info.plan_text_compression = stored_plan_compression;
-		}
-		else
-		{
-			shstatent->stats.info.plan_text_size = 0;
-			shstatent->stats.info.plan_text_truncated = false;
-			shstatent->stats.info.plan_text_compression = 0;
-		}
-		shstatent->stats.info.plan_encoding = GetDatabaseEncoding();
-		shstatent->stats.info.plan_advice = InvalidDsaPointer;
-		shstatent->stats.info.plan_advice_size = 0;
+			memcpy(dsa_get_address(pgsp_plan_dsa, plan_dp), stored_plan, stored_plan_size);
 
-		/*
-		 * Take an extra reference so pgstat can't free the entry (and orphan
-		 * its plan text) until pgsp_dealloc_release() reclaims it. We do this
-		 * for every new entry, even ones without text, so that we have an
-		 * accurate total entry count, and gc_plan_memory is solely responsible
-		 * to ensure final cleanup.
-		 *
-		 * The exception to this are resurrected entries, which can occur when
-		 * an entry was marked as dropped, but not actually removed yet. If
-		 * a dropped entry is attempted to be recreated, the old entry gets
-		 * reset, but the reference counts are kept. We can detect this through
-		 * the generation counter, and pretend no new entry was created.
-		 */
-		if (pg_atomic_read_u32(&entry_ref->shared_entry->generation) == 0)
-		{
-			pg_atomic_fetch_add_u32(&entry_ref->shared_entry->refcount, 1);
-			pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
-		}
+			(void) pgstat_custom_lock_entry(entry_ref, false);
 
-		pgstat_custom_unlock_entry(entry_ref);
+			/*
+			 * The entry may have been dropped since we unlocked it, in which
+			 * case nobody will read the text, or even resurrected by another
+			 * backend that already stored the text.
+			 */
+			if (!entry_ref->shared_entry->dropped &&
+				!DsaPointerIsValid(shstatent->stats.info.plan_text))
+			{
+				shstatent->stats.info.plan_text = plan_dp;
+				shstatent->stats.info.plan_text_size = stored_plan_size;
+				shstatent->stats.info.plan_text_truncated = stored_plan_truncated;
+				shstatent->stats.info.plan_text_compression = stored_plan_compression;
+				plan_dp = InvalidDsaPointer;
+			}
+
+			pgstat_custom_unlock_entry(entry_ref);
+
+			if (DsaPointerIsValid(plan_dp))
+				dsa_free(pgsp_plan_dsa, plan_dp);
+		}
 
 		pfree(plan);
 	}
@@ -1763,10 +1865,33 @@ _PG_init(void)
 	pgstat_custom_register_kind(PGSTAT_KIND_PLANS, &plan_stats);
 }
 
+/*
+ * Select the entries to drop on reset. Called with the entry's partition of
+ * the shared hashtable locked exclusively.
+ *
+ * Entries whose creating backend has not yet taken our extra reference are
+ * kept. Dropping those would break the reference counting that
+ * pgsp_dealloc_release() relies on, and they belong to a statement that is
+ * executing right now, which will show up after the reset.
+ */
 static bool
 match_plans_entries(PgStatShared_HashEntry *entry, Datum match_data)
 {
-	return entry->key.kind == PGSTAT_KIND_PLANS;
+	PgStatShared_Common *header;
+	PgStat_StatPlanEntry *statent;
+	bool		initialized;
+
+	if (entry->key.kind != PGSTAT_KIND_PLANS)
+		return false;
+
+	header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), entry->body);
+	statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
+
+	LWLockAcquire(&header->lock, LW_SHARED);
+	initialized = statent->info.initialized;
+	LWLockRelease(&header->lock);
+
+	return initialized;
 }
 
 /*
@@ -1867,6 +1992,10 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		LWLockAcquire(&header->lock, LW_SHARED);
 		snap = *statent;
 		LWLockRelease(&header->lock);
+
+		/* Skip entries their creating backend has not yet identified */
+		if (!snap.info.initialized)
+			continue;
 
 		values[i++] = ObjectIdGetDatum(snap.info.userid);
 		values[i++] = ObjectIdGetDatum(p->key.dboid);
