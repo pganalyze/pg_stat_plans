@@ -8,6 +8,23 @@
   - Store plan entries in a dedicated stats hash table, separate from the
     shared hash table used by other stats kinds
   - Adapt to pg_attribute_always_inline being removed in favor of pg_always_inline
+* Fix crashes when a plan entry is dropped while it is still being created
+  - A reset or deallocation cycle that ran between a backend creating an
+    entry and taking the extension's extra reference on it could free the
+    entry while that backend still used it, and made the entry counter
+    underflow. Entries are now identified and referenced before the plan text
+    is generated, and are not dropped until that has happened.
+  - Deallocation now marks entries as dropped itself, under the same lock as
+    its checks, which also avoids "trying to drop stats entry already dropped"
+    errors when racing a reset
+* Fix crash when deallocating entries and no live entry could be considered
+  - This could occur when exceeding pg_stat_plans.max whilst all entries were
+    either already dropped (but still referenced by another backend) or
+    locked, causing a pfree of an empty list
+* Postgres 18+: Free dropped entries when the last backend referencing them exits
+  - Previously such entries stayed around until a later deallocation cycle or
+    reset. If the server was shut down before that, assert-enabled builds
+    failed an assertion when writing the stats file.
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication
