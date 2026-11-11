@@ -8,6 +8,10 @@
   - Store plan entries in a dedicated stats hash table, separate from the
     shared hash table used by other stats kinds
   - Adapt to pg_attribute_always_inline being removed in favor of pg_always_inline
+* Fix crash when deallocating entries and no live entry could be considered
+  - This could occur when exceeding pg_stat_plans.max whilst all entries were
+    either already dropped (but still referenced by another backend) or
+    locked, causing a pfree of an empty list
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication

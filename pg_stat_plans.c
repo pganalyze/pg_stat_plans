@@ -443,14 +443,11 @@ pgsp_dealloc_entries(void)
 #endif
 	}
 
-	/* Clean up our working memory immediately */
-	foreach(lc, entries)
-	{
-		PlanDeallocEntry *entry = lfirst(lc);
-
-		pfree(entry);
-	}
-	pfree(entries);
+	/*
+	 * Clean up our working memory immediately. Note the list may be empty
+	 * (NIL), if no live entry could be considered in this cycle.
+	 */
+	list_free_deep(entries);
 }
 
 /*
