@@ -21,6 +21,10 @@
   - This could occur when exceeding pg_stat_plans.max whilst all entries were
     either already dropped (but still referenced by another backend) or
     locked, causing a pfree of an empty list
+* Postgres 18+: Free dropped entries when the last backend referencing them exits
+  - Previously such entries stayed around until a later deallocation cycle or
+    reset. If the server was shut down before that, assert-enabled builds
+    failed an assertion when writing the stats file.
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication

@@ -210,6 +210,9 @@ typedef struct PgStatShared_Plan
 static bool plan_stats_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 static uint64 pgsp_calculate_plan_id(PlannedStmt *result);
 static bool pgsp_attach_shmem(void);
+#if PG_VERSION_NUM >= 180000
+static void pgsp_init_backend_cb(void);
+#endif
 
 static const PgStat_KindInfo plan_stats = {
 	.name = "plan_stats",
@@ -245,6 +248,9 @@ static const PgStat_KindInfo plan_stats = {
 	.shared_data_len = sizeof(((PgStatShared_Plan *) 0)->stats),
 	.pending_size = sizeof(PgStat_StatPlanEntry),
 	.flush_pending_cb = plan_stats_flush_cb,
+#if PG_VERSION_NUM >= 180000
+	.init_backend_cb = pgsp_init_backend_cb,
+#endif
 };
 
 /*
@@ -651,6 +657,75 @@ pgsp_dealloc(void)
 	}
 	PG_END_TRY();
 }
+
+#if PG_VERSION_NUM >= 180000
+
+/* Value of the stats system's gc_request_count when this process started */
+static uint64 pgsp_start_gc_count = 0;
+
+/*
+ * Free dropped entries that this backend was the last one to reference, once
+ * it has let go of them at exit.
+ *
+ * Because of our extra reference, a dropped entry is not freed when the last
+ * backend releases its reference, but only by a later pgsp_dealloc_release().
+ * Without this callback, entries dropped while backends still referenced them
+ * would stay around until some backend happens to run another deallocation
+ * cycle or a reset. If the server is shut down before that, the stats system
+ * finds them when writing the stats file, where it expects none, because all
+ * processes have released their references by then.
+ *
+ * So each backend runs pgsp_dealloc_release() once more after it has released
+ * all its references. Whichever backend is last to let go of an entry thereby
+ * also frees it.
+ *
+ * This is registered from pgsp_init_backend_cb(), i.e. before the stats
+ * system registers its own shutdown callback, so that it runs after it. By
+ * then this backend has flushed its pending stats and released its references,
+ * but has also detached from the stats system, so attach again for the
+ * duration of the cleanup. Our own shared state is still attached, since
+ * dynamic shared memory segments are only detached after all before_shmem_exit
+ * callbacks have run.
+ */
+static void
+pgsp_backend_exit(int code, Datum arg)
+{
+	/*
+	 * In single-user mode the stats file has already been written at this
+	 * point, and attaching again is not possible there anyway.
+	 */
+	if (!IsUnderPostmaster)
+		return;
+
+	/* Backends that never used pg_stat_plans hold no references to entries */
+	if (pgsp_shared == NULL || pgsp_plan_dsa == NULL)
+		return;
+
+	/* Nothing to do if no entry was dropped during this backend's lifetime */
+	if (pg_atomic_read_u64(&pgStatLocal.shmem->gc_request_count) == pgsp_start_gc_count)
+		return;
+
+	/* Not expected, but don't attach twice if we never detached */
+	if (pgstat_custom_dsa(PGSTAT_KIND_PLANS) != NULL)
+		return;
+
+	pgstat_attach_shmem();
+	pgsp_dealloc_release();
+	pgstat_detach_shmem();
+}
+
+/*
+ * Called at startup of every process that initializes the stats system, just
+ * before that registers its own shutdown callback.
+ */
+static void
+pgsp_init_backend_cb(void)
+{
+	pgsp_start_gc_count = pg_atomic_read_u64(&pgStatLocal.shmem->gc_request_count);
+	before_shmem_exit(pgsp_backend_exit, 0);
+}
+
+#endif							/* PG_VERSION_NUM >= 180000 */
 
 static char *
 pgsp_compress_plan_text_zstd(char *plan, size_t plan_len, size_t *stored_plan_size, bool *stored_plan_truncated)
