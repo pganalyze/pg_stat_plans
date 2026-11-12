@@ -29,6 +29,10 @@
     deallocated entries had not been freed yet
   - Entries are now only deallocated when a new plan is about to be tracked,
     instead of on every execution whilst over the limit
+  - Fix newly tracked plans being the first to be deallocated again. The
+    first execution of a new plan is now counted in its usage right away
+    instead of with the next stats flush, and plans that were used since the
+    previous deallocation cycle are kept for another cycle.
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication

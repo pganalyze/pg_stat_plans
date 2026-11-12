@@ -187,8 +187,7 @@ static dsa_area *pgsp_plan_dsa = NULL;
 	(pgsp_track == PGSP_TRACK_ALL || \
 	(pgsp_track == PGSP_TRACK_TOP && (level) == 0)))
 
-#define USAGE_INCREASE			0.5 /* increase by this each time we report
-									 * stats */
+#define USAGE_EXEC				(1.0)	/* usage added by each execution */
 #define USAGE_DECREASE_FACTOR	(0.99)	/* decreased every
 										 * pgsp_dealloc_entries */
 #define USAGE_DEALLOC_PERCENT	5	/* free this % of entries at once */
@@ -224,8 +223,20 @@ typedef enum pgspEntryState
 /* Structures for statistics of plans */
 typedef struct PgStatShared_PlanInfo
 {
-	/* protected by the entry lock, like all other fields */
+	/* protected by the entry lock, like all other fields except recently_used */
 	pgspEntryState state;
+
+	/*
+	 * Set when the plan is used, and cleared by each deallocation cycle, so
+	 * that a cycle can tell which entries were used since the previous one.
+	 * The usage of an entry only reflects executions once they were flushed,
+	 * which this makes up for.
+	 *
+	 * This is read and written without holding the entry lock, and is only
+	 * written when not set already, so that executing a plan does not modify
+	 * shared memory in the common case.
+	 */
+	pg_atomic_uint32 recently_used;
 
 	/* key elements that identify a plan */
 	Oid			dbid;
@@ -398,6 +409,13 @@ pgsp_explain_plan(QueryDesc *queryDesc)
 	return es_str->data;
 }
 
+/* An entry considered for deallocation, see pgsp_dealloc_entries() */
+typedef struct PlanDeallocEntry
+{
+	PgStat_HashKey key;
+	double		usage;
+}			PlanDeallocEntry;
+
 /*
  * Remove a live entry: it is no longer shown or counted, and its plan text
  * (and any advice string) is freed.
@@ -406,18 +424,27 @@ pgsp_explain_plan(QueryDesc *queryDesc)
  * drop it in the stats system. Returns false if the entry is not live, i.e.
  * not initialized yet, or already removed by someone else.
  *
+ * With "is_victim", which is what deallocation passes, also return false if
+ * the entry was used since it was chosen as a victim, or if its lock is busy,
+ * which means it is being used right now.
+ *
  * Since only the caller that removed an entry drops it, an entry is dropped
  * exactly once. And since the plan text is freed here, the stats system can
  * free the entry itself whenever the last reference to it is released.
  */
 static bool
-pgsp_entry_remove(PgStatShared_Common *header, PgStat_StatPlanEntry *statent)
+pgsp_entry_remove(PgStatShared_Common *header, PgStat_StatPlanEntry *statent,
+				  bool is_victim)
 {
 	bool		removed = false;
 
-	LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+	if (!is_victim)
+		LWLockAcquire(&header->lock, LW_EXCLUSIVE);
+	else if (!LWLockConditionalAcquire(&header->lock, LW_EXCLUSIVE))
+		return false;
 
-	if (statent->info.state == PGSP_ENTRY_LIVE)
+	if (statent->info.state == PGSP_ENTRY_LIVE &&
+		(!is_victim || pg_atomic_read_u32(&statent->info.recently_used) == 0))
 	{
 		statent->info.state = PGSP_ENTRY_REMOVED;
 
@@ -440,12 +467,6 @@ pgsp_entry_remove(PgStatShared_Common *header, PgStat_StatPlanEntry *statent)
 
 	return removed;
 }
-
-typedef struct PlanDeallocEntry
-{
-	PgStat_HashKey key;
-	double		usage;
-}			PlanDeallocEntry;
 
 /*
  * list sort comparator for sorting into decreasing usage order
@@ -473,6 +494,7 @@ pgsp_dealloc_entries(void)
 	List	   *entries = NIL;
 	ListCell   *lc;
 	int			nvictims;
+	uint64		nentries;
 	bool		not_freed = false;
 
 	/* dshash entry is not modified, take shared lock */
@@ -502,6 +524,18 @@ pgsp_dealloc_entries(void)
 
 		statent->usage *= USAGE_DECREASE_FACTOR;
 
+		/*
+		 * Give entries that were used since the previous cycle a second
+		 * chance: their usage may not reflect that use yet, as executions are
+		 * only counted in it when flushed. They are considered again in the
+		 * next cycle, unless they are used again until then.
+		 */
+		if (pg_atomic_exchange_u32(&statent->info.recently_used, 0) != 0)
+		{
+			LWLockRelease(&header->lock);
+			continue;
+		}
+
 		entry = palloc(sizeof(PlanDeallocEntry));
 		entry->key = p->key;
 		entry->usage = statent->usage;
@@ -515,13 +549,22 @@ pgsp_dealloc_entries(void)
 	/* Sort by usage ascending (lowest used entries are last) */
 	list_sort(entries, entry_cmp_lru);
 
-	/* At a minimum, deallocate 10 entries to make it worth our while */
-	nvictims = Max(10, list_length(entries) * USAGE_DEALLOC_PERCENT / 100);
+	/*
+	 * At a minimum, deallocate 10 entries to make it worth our while, plus
+	 * the entries exceeding pg_stat_plans.max, e.g. after it was lowered. If
+	 * too few entries can be considered, because most were used recently, the
+	 * next cycle deallocates the rest.
+	 */
+	nentries = pg_atomic_read_u64(&pgsp_shared->nentries);
+	nvictims = Max(10, (int) (Min(nentries, (uint64) pgsp_max) * USAGE_DEALLOC_PERCENT / 100));
+	if (nentries > (uint64) pgsp_max)
+		nvictims += (int) Min(nentries - (uint64) pgsp_max, (uint64) list_length(entries));
 	nvictims = Min(nvictims, list_length(entries));
 
 	/*
-	 * Remove the victims, unless someone else removed them since, and drop
-	 * the ones we removed.
+	 * Remove the victims, unless they were used or removed by someone else
+	 * since, and drop the ones we removed. The next cycle deallocates any
+	 * excess that is left.
 	 */
 	for_each_from(lc, entries, list_length(entries) - nvictims)
 	{
@@ -546,7 +589,7 @@ pgsp_dealloc_entries(void)
 			continue;
 
 		shstatent = (PgStatShared_Plan *) entry_ref->shared_stats;
-		if (!pgsp_entry_remove(&shstatent->header, &shstatent->stats))
+		if (!pgsp_entry_remove(&shstatent->header, &shstatent->stats, true))
 			continue;
 
 		/*
@@ -1017,6 +1060,14 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 			/* The plan text and advice fields start out zeroed */
 
+			/*
+			 * Count the execution that is about to happen in the usage of the
+			 * entry right away, instead of with our next flush. Otherwise the
+			 * entry would be the first to be deallocated again until then.
+			 */
+			shstatent->stats.usage = USAGE_EXEC;
+			pg_atomic_init_u32(&shstatent->stats.info.recently_used, 1);
+
 			shstatent->stats.info.state = PGSP_ENTRY_LIVE;
 			pg_atomic_fetch_add_u64(&pgsp_shared->nentries, 1);
 			initialized = true;
@@ -1025,7 +1076,12 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		pgstat_custom_unlock_entry(entry_ref);
 
 		if (initialized)
+		{
+			/* The usage of our first execution is counted already, see above */
+			pending->usage -= USAGE_EXEC;
+
 			pgsp_store_plan_text(queryDesc, entry_ref);
+		}
 	}
 
 #if PG_VERSION_NUM >= 190000
@@ -1076,7 +1132,16 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 	pending->exec_count += exec_count;
 	pending->exec_time += exec_time;
-	pending->usage += USAGE_INCREASE;
+
+	pending->usage += USAGE_EXEC * exec_count;
+
+	/*
+	 * Let deallocation know that the plan is in use, since the usage above
+	 * only reaches the shared entry with our next flush. Only write when
+	 * needed, so that the shared entry is not modified by every execution.
+	 */
+	if (pg_atomic_read_u32(&shstatent->stats.info.recently_used) == 0)
+		pg_atomic_write_u32(&shstatent->stats.info.recently_used, 1);
 }
 
 static void
@@ -1877,7 +1942,7 @@ pgsp_reset_remove_entry(PgStatShared_HashEntry *entry, Datum match_data)
 	header = dsa_get_address(pgstat_custom_dsa(PGSTAT_KIND_PLANS), entry->body);
 	statent = (PgStat_StatPlanEntry *) pgstat_custom_get_entry_data(PGSTAT_KIND_PLANS, header);
 
-	return pgsp_entry_remove(header, statent);
+	return pgsp_entry_remove(header, statent, false);
 }
 
 /*
