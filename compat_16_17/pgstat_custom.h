@@ -14,6 +14,7 @@
 #define pgstat_custom_drop_entry pgstat_drop_entry
 #define pgstat_custom_drop_matching_entries pgstat_drop_matching_entries
 #define pgstat_custom_request_entry_refs_gc pgstat_request_entry_refs_gc
+#define pgstat_custom_get_entry_ref pgstat_get_entry_ref
 
 #define pgstat_custom_get_entry_data pgstat_get_entry_data
 
