@@ -156,7 +156,8 @@ PG_FUNCTION_INFO_V1(pg_stat_plans_2_0_get_activity);
 /* Structures for statistics of plans */
 typedef struct PgStatShared_PlanInfo
 {
-	/* key elements that identify a plan (together with the dboid) */
+	/* key elements that identify a plan */
+	Oid			dbid;
 	uint64		planid;
 	uint64		queryid;
 	Oid			userid;			/* userid is tracked to allow users to see
@@ -236,13 +237,38 @@ static const PgStat_KindInfo plan_stats = {
 };
 
 /*
- * Compute stats entry idx from query ID and plan ID with an 8-byte hash.
+ * Compute stats entry idx from the key elements of a plan with an 8-byte hash.
  *
  * Whilst we could theorically just use the plan ID here, we intentionally
  * add the query ID into the mix to ease interpreting the data in combination
  * with pg_stat_statements.
+ *
+ * The database is part of this hash, instead of being passed as the database
+ * of the stats entry (for which we always pass InvalidOid). The stats system
+ * drops all entries of a database when that database is dropped, and resets
+ * them on pg_stat_reset(), neither of which it can do correctly for our
+ * entries, since it does not know about the plan text they point to. Plans of
+ * a dropped database thus stay around until they are deallocated or reset,
+ * like in pg_stat_statements.
+ *
+ * On Postgres 16 and 17 the object ID of a stats entry only has 4 bytes, so
+ * only the lower half of this hash is used there. hash_combine64() never
+ * carries the upper half of its inputs into the lower half of its result, so
+ * the user and the database must both be mixed into the lower half there.
  */
-#define PGSTAT_PLAN_IDX(query_id, plan_id, user_id, toplevel) hash_combine64(toplevel, hash_combine64(query_id, hash_combine64(plan_id, user_id)))
+#if PG_VERSION_NUM >= 180000
+#define PGSTAT_PLAN_USER_DB(user_id, db_id) \
+	(((uint64) (user_id) << 32) | (db_id))
+#else
+#define PGSTAT_PLAN_USER_DB(user_id, db_id) \
+	hash_combine64(murmurhash32(user_id), db_id)
+#endif
+
+#define PGSTAT_PLAN_IDX(db_id, query_id, plan_id, user_id, toplevel) \
+	hash_combine64(toplevel, \
+				   hash_combine64(query_id, \
+								  hash_combine64(plan_id, \
+												 PGSTAT_PLAN_USER_DB(user_id, db_id))))
 
 /*
  * Kind ID reserved for statistics of plans.
@@ -457,8 +483,8 @@ pgsp_dealloc_entries(void)
  * Release (refcount to 0 + drop) entries after ensuring query text got freed.
  *
  * This is needed in addition to the entry walk (which also frees query text)
- * because certain operations (reset function, DROP DATABASE) cause us to have
- * entries that are dropped but whose query text has not been freed.
+ * because the reset function causes us to have entries that are dropped but
+ * whose query text has not been freed.
  */
 static void
 pgsp_dealloc_release(void)
@@ -875,8 +901,9 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 		pg_atomic_read_u64(&pgsp_shared->nentries) > (uint64) pgsp_max)
 		pgsp_dealloc();
 
-	entry_ref = pgstat_custom_prep_pending_entry(PGSTAT_KIND_PLANS, MyDatabaseId,
-										  PGSTAT_PLAN_IDX(queryId, planId, userid, toplevel), &newly_created);
+	entry_ref = pgstat_custom_prep_pending_entry(PGSTAT_KIND_PLANS, InvalidOid,
+										  PGSTAT_PLAN_IDX(MyDatabaseId, queryId, planId, userid, toplevel),
+										  &newly_created);
 
 	shstatent = (PgStatShared_Plan *) entry_ref->shared_stats;
 	pending = (PgStat_StatPlanEntry *) entry_ref->pending;
@@ -891,6 +918,7 @@ pgstat_report_plan_stats(QueryDesc *queryDesc,
 
 		(void) pgstat_custom_lock_entry(entry_ref, false);
 
+		shstatent->stats.info.dbid = MyDatabaseId;
 		shstatent->stats.info.planid = planId;
 		shstatent->stats.info.queryid = queryId;
 		shstatent->stats.info.userid = userid;
@@ -1872,7 +1900,7 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		LWLockRelease(&header->lock);
 
 		values[i++] = ObjectIdGetDatum(snap.info.userid);
-		values[i++] = ObjectIdGetDatum(p->key.dboid);
+		values[i++] = ObjectIdGetDatum(snap.info.dbid);
 		values[i++] = BoolGetDatum(snap.info.toplevel);
 		if (is_allowed_role || snap.info.userid == userid)
 		{

@@ -8,6 +8,13 @@
   - Store plan entries in a dedicated stats hash table, separate from the
     shared hash table used by other stats kinds
   - Adapt to pg_attribute_always_inline being removed in favor of pg_always_inline
+* Don't associate plan entries with their database in the stats system
+  - Fixes pg_stat_reset() clearing the plan entries of the current database
+    in place, which lost their plan text, user and query/plan IDs, and leaked
+    the memory used by the plan text
+  - Plans of a dropped database are now kept until they are deallocated or
+    reset, like in pg_stat_statements, instead of being dropped together with
+    the database
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication
