@@ -8,6 +8,31 @@
   - Store plan entries in a dedicated stats hash table, separate from the
     shared hash table used by other stats kinds
   - Adapt to pg_attribute_always_inline being removed in favor of pg_always_inline
+* Don't associate plan entries with their database in the stats system
+  - Fixes pg_stat_reset() clearing the plan entries of the current database
+    in place, which lost their plan text, user and query/plan IDs, and leaked
+    the memory used by the plan text
+  - Plans of a dropped database are now kept until they are deallocated or
+    reset, like in pg_stat_statements, instead of being dropped together with
+    the database
+* Rework how plan entries are created, deallocated and freed, modeled after
+  the proposed move of pg_stat_statements to the cumulative statistics system
+  - Fix crashes and an entry counter underflow when an entry was deallocated
+    or reset while it was still being created
+  - Fix too many entries being deallocated when exceeding pg_stat_plans.max
+    whilst other backends (e.g. idle connections) still referenced
+    deallocated entries, up to the point where no plans were tracked anymore
+  - Fix entries that could never be freed after two backends started tracking
+    the same previously deallocated plan at the same time. On assert-enabled
+    builds this failed an assertion at shutdown.
+  - Fix assertion failure at shutdown on assert-enabled builds when
+    deallocated entries had not been freed yet
+  - Entries are now only deallocated when a new plan is about to be tracked,
+    instead of on every execution whilst over the limit
+  - Fix newly tracked plans being the first to be deallocated again. The
+    first execution of a new plan is now counted in its usage right away
+    instead of with the next stats flush, and plans that were used since the
+    previous deallocation cycle are kept for another cycle.
 * Postgres 16/17 compatibility layer
   - Fix crash in processes that are not regular client backends (#31)
     - The stats machinery was only attached in the client authentication
