@@ -29,6 +29,14 @@
     another backend still held a reference
     - Ports the upstream fix to pgstat_release_entry_ref
       ([e9d0600aba](https://git.postgresql.org/gitweb/?p=postgresql.git;a=commit;h=e9d0600aba5467b352eb67aaf6ad92a9a4776b0a))
+* Fix reading plan texts failing for all entries due to a single one (#29)
+  - Truncate plan texts exceeding `max_size` at a character boundary, instead
+    of possibly splitting a multibyte character, which made the stored text
+    invalid
+  - Return a NULL plan for an entry whose plan text can't be decompressed, or
+    converted to the encoding of the database it's read from (e.g. a plan
+    recorded in a UTF8 database with characters that don't exist in LATIN1),
+    instead of raising an error
 
 ## 2.1.1   2026-09-23
 

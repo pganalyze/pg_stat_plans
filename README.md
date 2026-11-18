@@ -138,6 +138,8 @@ plan            | Limit                                                         
                 |                     Index Cond: (server_id = '00000000-0000-0000-0000-000000000000'::uuid)
 ```
 
+The `plan` column is NULL if the plan text can't be decompressed or converted to the encoding of the database you are querying from (for example, a plan recorded in a UTF8 database containing characters that don't exist in LATIN1).
+
 If you are only interested in the statistics, you can alternatively call `pg_stat_plans(false)` to omit the plan text:
 
 ```sql
