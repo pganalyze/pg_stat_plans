@@ -1,0 +1,80 @@
+--
+-- zstd-compressed plan texts (#29). Builds without zstd store the text
+-- uncompressed instead, emitting an INFO message for each new entry while
+-- compress = zstd; their output is zstd_1.out.
+--
+SELECT current_database() AS orig_db \gset
+-- Independent of the encoding of the regression database
+CREATE DATABASE regress_pgsp_zstd TEMPLATE template0 ENCODING 'UTF8'
+  LOCALE_PROVIDER libc LOCALE 'C';
+\c regress_pgsp_zstd
+SET client_encoding = 'UTF8';
+CREATE EXTENSION pg_stat_plans;
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+CREATE TABLE pgsp_zstd_mb (v text);
+CREATE TABLE pgsp_zstd_long (v text);
+--
+-- Input is fed to the compressor in steps clipped to character boundaries;
+-- the steps must still add up to the exact text.
+--
+SET pg_stat_plans.compress = zstd;
+SELECT * FROM pgsp_zstd_mb WHERE v <> repeat('é', 300);
+INFO:  zstd compression not enabled in build, falling back to no compression
+ v 
+---
+(0 rows)
+
+RESET pg_stat_plans.compress;
+SELECT plan LIKE '%(v <> ''' || repeat('é', 300) || '''::text)' AS plan_complete
+  FROM pg_stat_plans WHERE plan LIKE 'Seq Scan on pgsp_zstd_mb%';
+ plan_complete 
+---------------
+ t
+(1 row)
+
+--
+-- A compressed text that can't be decompressed is returned as a NULL plan
+-- rather than failing the whole read. Decompression output is limited by the
+-- reading session's max_size, so a long text recorded with the default limit
+-- can't be decompressed by a session with a much lower one.
+--
+SET pg_stat_plans.compress = zstd;
+SELECT * FROM pgsp_zstd_long WHERE v <> repeat('x', 4000);
+INFO:  zstd compression not enabled in build, falling back to no compression
+ v 
+---
+(0 rows)
+
+RESET pg_stat_plans.compress;
+SELECT queryid AS long_queryid, planid AS long_planid FROM pg_stat_plans
+  WHERE plan LIKE 'Seq Scan on pgsp_zstd_long%' \gset
+SET pg_stat_plans.max_size = 100;
+SELECT plan IS NULL AS plan_is_null, calls >= 0 AS has_stats
+  FROM pg_stat_plans WHERE queryid = :long_queryid AND planid = :long_planid;
+ plan_is_null | has_stats 
+--------------+-----------
+ f            | t
+(1 row)
+
+RESET pg_stat_plans.max_size;
+-- The same entry decompresses with the default limit
+SELECT octet_length(plan) > 4000 AS plan_complete
+  FROM pg_stat_plans WHERE queryid = :long_queryid AND planid = :long_planid;
+ plan_complete 
+---------------
+ t
+(1 row)
+
+SELECT pg_stat_plans_reset() IS NOT NULL AS t;
+ t 
+---
+ t
+(1 row)
+
+\c :orig_db
+DROP DATABASE regress_pgsp_zstd;

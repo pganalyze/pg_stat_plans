@@ -17,6 +17,7 @@
 
 #include "access/htup_details.h"
 #include "access/parallel.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "commands/explain.h"
 #if PG_VERSION_NUM >= 180000
@@ -596,6 +597,7 @@ pgsp_compress_plan_text_zstd(char *plan, size_t plan_len, size_t *stored_plan_si
 	ZSTD_outBuffer outBuf = {0};
 	int			level = ZSTD_CLEVEL_DEFAULT;
 	size_t		compressStep = 100; /* Compress in 100 byte input increments */
+	int			chunk_len = 0;
 	size_t		yet_to_flush;
 
 	size_t		ret = ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel,
@@ -616,11 +618,33 @@ pgsp_compress_plan_text_zstd(char *plan, size_t plan_len, size_t *stored_plan_si
 
 	/*
 	 * Compress data in steps, stopping early if we're likely to exceed our
-	 * limit
+	 * limit.
+	 *
+	 * Each step is clipped to a character boundary (in the database encoding,
+	 * which is the plan text's encoding here): when we stop early, the stored
+	 * text ends at the end of the last step fed in, and a multibyte character
+	 * split there would make the decompressed text invalid in its encoding,
+	 * so the reader could never return it (see pgsp_plan_to_server()).
 	 */
-	for (int pos = 0; pos < plan_len; pos += compressStep)
+	for (size_t pos = 0; pos < plan_len; pos += chunk_len)
 	{
-		ZSTD_inBuffer inBuf = {plan + pos, Min(compressStep, plan_len - pos), 0};
+		ZSTD_inBuffer inBuf;
+
+		chunk_len = pg_mbcliplen(plan + pos, (int) (plan_len - pos), (int) compressStep);
+
+		/*
+		 * Can't happen for valid text (compressStep exceeds the longest
+		 * character), but never loop forever without making progress.
+		 */
+		if (chunk_len <= 0)
+		{
+			*stored_plan_truncated = true;
+			break;
+		}
+
+		inBuf.src = plan + pos;
+		inBuf.size = chunk_len;
+		inBuf.pos = 0;
 
 		do
 		{
@@ -688,6 +712,12 @@ pgsp_compress_plan_text_zstd(char *plan, size_t plan_len, size_t *stored_plan_si
 #endif
 }
 
+/*
+ * Decompress a zstd-compressed plan text. Returns NULL if the text can't be
+ * decompressed (e.g. it expands beyond the output buffer, which is sized from
+ * the reading session's max_size), so that the caller reports a NULL plan for
+ * this entry rather than failing the whole read; see pg_stat_plans_2_0().
+ */
 static char *
 pgsp_decompress_plan_text_zstd(char *stored_plan, size_t stored_plan_size)
 {
@@ -702,13 +732,14 @@ pgsp_decompress_plan_text_zstd(char *stored_plan, size_t stored_plan_size)
 	outBuf.size = pgsp_max_size * 20;
 
 	ret = ZSTD_decompressStream(dctx, &outBuf, &inBuf);
-	if (ZSTD_isError(ret))
-		elog(ERROR, "could not decompress data: %s",
-			 ZSTD_getErrorName(ret));
-	if (ret != 0)
-		elog(ERROR, "EOF before end of stream: %zu", ret);
-
 	ZSTD_freeDCtx(dctx);
+
+	/* Decoding error, or frame incomplete (EOF before end of stream) */
+	if (ZSTD_isError(ret) || ret != 0)
+	{
+		pfree(outBuf.dst);
+		return NULL;
+	}
 
 	((char *) outBuf.dst)[outBuf.pos] = '\0';
 
@@ -735,14 +766,23 @@ pgsp_compress_plan_text(char *plan, size_t *stored_plan_size, bool *stored_plan_
 		}
 	}
 
-	/* Default (no compression) */
-	*stored_plan_size = Min(plan_len, pgsp_max_size);
+	/*
+	 * Default (no compression). Truncate at a character boundary rather than
+	 * at exactly max_size bytes: the text is in the database encoding, and a
+	 * split multibyte character at the end would make the stored text invalid
+	 * in that encoding, so the reader could never return it.
+	 */
+	*stored_plan_size = pg_mbcliplen(plan, (int) plan_len, pgsp_max_size);
 	*stored_plan_truncated = plan_len > pgsp_max_size;
 	*stored_plan_compression = PGSP_COMPRESS_NONE;
 
 	return plan;
 }
 
+/*
+ * Return a palloc'd, NUL-terminated copy of a stored plan text, or NULL if it
+ * can't be decompressed.
+ */
 static char *
 pgsp_decompress_plan_text(char *stored_plan, size_t stored_plan_size, int stored_plan_compression)
 {
@@ -763,6 +803,83 @@ pgsp_decompress_plan_text(char *stored_plan, size_t stored_plan_size, int stored
 	}
 
 	pg_unreachable();
+}
+
+/*
+ * Convert a plan text from the encoding it was recorded in (that of the
+ * database the plan ran in) to the current database encoding. Returns the
+ * converted string (possibly s itself), or NULL if s is not valid in its
+ * encoding or has characters with no equivalent in the database encoding.
+ *
+ * This mirrors pg_any_to_server(), but never throws. pg_stat_plans() reads
+ * entries recorded in every database of the cluster, so one undecodable entry
+ * must not fail the whole read; the caller instead returns a NULL plan for
+ * that entry, and NULL is the only signal that this happened (no message is
+ * emitted, as it would repeat on every read).
+ *
+ * We can't instead call pg_any_to_server() and catch its error: the caller
+ * holds a dshash partition lock, and recovering from an error requires
+ * aborting a (sub)transaction, which releases all held LWLocks
+ * (LWLockReleaseAll()) behind the back of the in-progress dshash scan.
+ * Merely catching the error with PG_TRY() without that abort is not safe
+ * either.
+ */
+static char *
+pgsp_plan_to_server(char *s, int len, int encoding)
+{
+	int			db_encoding = GetDatabaseEncoding();
+	Oid			proc;
+	unsigned char *result;
+	int			converted;
+
+	if (len <= 0)
+		return s;				/* empty string is always valid */
+
+	if (encoding == db_encoding || encoding == PG_SQL_ASCII)
+	{
+		/* No conversion is needed, but we must still validate the data */
+		return pg_verify_mbstr(db_encoding, s, len, true) ? s : NULL;
+	}
+
+	if (db_encoding == PG_SQL_ASCII)
+	{
+		/*
+		 * No conversion is possible; validate as pg_any_to_server() does.
+		 * The recorded encoding is always a server encoding in practice, as
+		 * it comes from GetDatabaseEncoding().
+		 */
+		if (PG_VALID_BE_ENCODING(encoding))
+			return pg_verify_mbstr(encoding, s, len, true) ? s : NULL;
+
+		for (int i = 0; i < len; i++)
+		{
+			if (s[i] == '\0' || IS_HIGHBIT_SET(s[i]))
+				return NULL;
+		}
+		return s;
+	}
+
+	proc = FindDefaultConversionProc(encoding, db_encoding);
+	if (!OidIsValid(proc))
+		return NULL;
+
+	/*
+	 * With noError, the conversion function stops at the first invalid or
+	 * untranslatable input character and returns the number of input bytes
+	 * it converted.
+	 */
+	result = palloc((Size) len * MAX_CONVERSION_GROWTH + 1);
+	converted = pg_do_encoding_conversion_buf(proc, encoding, db_encoding,
+											  (unsigned char *) s, len,
+											  result, len * MAX_CONVERSION_GROWTH + 1,
+											  true);
+	if (converted < len)
+	{
+		pfree(result);
+		return NULL;
+	}
+
+	return (char *) result;
 }
 
 #if PG_VERSION_NUM >= 190000
@@ -1894,21 +2011,29 @@ pg_stat_plans_2_0(PG_FUNCTION_ARGS)
 		{
 			char	   *pstr = DsaPointerIsValid(snap.info.plan_text) ? dsa_get_address(pgsp_plan_dsa, snap.info.plan_text) : NULL;
 
+			/*
+			 * The plan is NULL if there's no stored text, or if it can't be
+			 * decompressed or converted to this database's encoding. Neither
+			 * of the latter may throw, as that would fail the whole read (and
+			 * we can't recover from an error here, see pgsp_plan_to_server).
+			 */
+			char	   *dec_pstr = NULL;
+			char	   *enc = NULL;
+
 			if (pstr)
-			{
-				char	   *dec_pstr = pgsp_decompress_plan_text(pstr, snap.info.plan_text_size, snap.info.plan_text_compression);
-				char	   *enc = pg_any_to_server(dec_pstr, strlen(dec_pstr), snap.info.plan_encoding);
+				dec_pstr = pgsp_decompress_plan_text(pstr, snap.info.plan_text_size, snap.info.plan_text_compression);
+			if (dec_pstr)
+				enc = pgsp_plan_to_server(dec_pstr, strlen(dec_pstr), snap.info.plan_encoding);
 
+			if (enc)
 				values[i++] = CStringGetTextDatum(enc);
-
-				if (enc != dec_pstr)
-					pfree(enc);
-				pfree(dec_pstr);
-			}
 			else
-			{
 				nulls[i++] = true;
-			}
+
+			if (enc && enc != dec_pstr)
+				pfree(enc);
+			if (dec_pstr)
+				pfree(dec_pstr);
 		}
 		else if (showplan)
 		{
