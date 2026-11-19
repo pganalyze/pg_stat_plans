@@ -1380,7 +1380,6 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *parsetree = pstmt->utilityStmt;
-	bool		enabled = pgsp_enabled(nesting_level);
 
 	/*
 	 * Even though we're not tracking plans for utility statements themselves,
@@ -1399,15 +1398,21 @@ pgsp_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		!IsA(parsetree, PrepareStmt);
 
 	/*
-	 * Force utility statements to get queryId zero. This matches what
-	 * pg_stat_statements does in its ProcessUtility hook, and is necessary to
-	 * allow joining on the queryId for pg_stat_plans_activity when
-	 * pg_stat_statements is not enabled. If pg_stat_statements is loaded this
-	 * is effectively a no-op, since either before our call of the hook, or
-	 * afterwards, pgss_ProcessUtility will do the same thing.
+	 * Unlike pg_stat_statements, we leave pstmt->queryId alone here. We don't
+	 * track utility statements, and the executor never runs the utility
+	 * statement's PlannedStmt itself (statements that do run a plan, such as
+	 * EXPLAIN ANALYZE or CREATE TABLE AS, plan and execute their inner query
+	 * separately, at a nesting level above zero), so nothing of ours depends
+	 * on its queryId. For EXECUTE, the queryId is already cleared in
+	 * pgsp_post_parse_analyze, which is what makes pg_stat_plans_activity
+	 * work for prepared statements.
+	 *
+	 * Clearing it here, on the other hand, broke pg_stat_statements when it
+	 * was listed before pg_stat_plans in shared_preload_libraries, i.e. when
+	 * its hook ran after ours: it saves the queryId on entry and skips the
+	 * statement if that is zero, so no utility statement (COPY, VACUUM,
+	 * CREATE INDEX, ...) was tracked by it anymore.
 	 */
-	if (enabled)
-		pstmt->queryId = UINT64CONST(0);
 
 	if (bump_level)
 		nesting_level++;

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+* Fix pg_stat_statements not tracking utility statements when it is listed
+  before pg_stat_plans in shared_preload_libraries
+  - Our ProcessUtility hook forced the query ID of utility statements to zero,
+    mirroring pg_stat_statements. With pg_stat_statements loaded before
+    pg_stat_plans, its hook ran after ours, and skipped every utility
+    statement (COPY, VACUUM, CREATE INDEX, ...) because of the zero query ID.
+    The query ID is now left alone, nothing in pg_stat_plans depended on
+    clearing it.
+  - The regression tests now also run with pg_stat_statements preloaded,
+    when it is installed
 * Postgres 20 support (in development, tested against the master branch)
   - Add plan jumble funcs for Postgres 20
   - Adapt to per-kind stats hash tables and DSA areas in pgstats
