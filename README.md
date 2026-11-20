@@ -55,6 +55,7 @@ pg_stat_plans.compress = 'zstd'
 ```
 
 Whilst `pg_stat_statements` is not directly required to use `pg_stat_plans`, you will likely want that in practice to make effective use of this extension.
+The two can be listed in `shared_preload_libraries` in either order.
 
 ### Installing on Kubernetes with CloudNativePG
 
