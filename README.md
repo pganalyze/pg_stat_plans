@@ -55,7 +55,7 @@ pg_stat_plans.compress = 'zstd'
 ```
 
 Whilst `pg_stat_statements` is not directly required to use `pg_stat_plans`, you will likely want that in practice to make effective use of this extension.
-The two can be listed in `shared_preload_libraries` in either order. Note that pg_stat_plans 2.1.1 and earlier had to be listed *before* `pg_stat_statements`, as `pg_stat_statements` otherwise stopped tracking utility statements such as `COPY`, `VACUUM` or `CREATE INDEX`.
+The two can be listed in `shared_preload_libraries` in either order.
 
 ### Installing on Kubernetes with CloudNativePG
 
